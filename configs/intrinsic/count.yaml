@@ -1,0 +1,5 @@
+name: "count_bonus"
+coef: 0.01
+power: 0.5
+eps: 1.0e-8
+use_state_action: false

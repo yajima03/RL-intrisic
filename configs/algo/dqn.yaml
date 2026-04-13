@@ -1,0 +1,55 @@
+algo_name: "dqn"
+
+policy: "CnnPolicy"
+device: "auto"
+seed: 0
+progress_bar: true
+deterministic_eval: true
+
+total_timesteps: 30000
+buffer_size: 10000
+learning_starts: 5000
+train_freq: 4
+gradient_steps: 4
+batch_size: 32
+
+learning_rate: 0.0001
+tau: 1.0
+gamma: 1.0
+exploration_fraction: 0.75
+exploration_initial_eps: 1
+exploration_final_eps: 0.05
+target_update_interval: 200
+
+max_grad_norm: 5.0
+
+policy_kwargs:
+  normalize_images: false
+  features_extractor:
+    conv_layers:
+      - out_channels: 32
+        kernel_size: 5
+        stride: 2
+        padding: 2
+      - out_channels: 32
+        kernel_size: 3
+        stride: 2
+        padding: 2
+      - out_channels: 64
+        kernel_size: 3
+        stride: 1
+        padding: 1
+    global_pool: "avg"
+    post_pool_norm: "layernorm"
+    activation: "relu"
+  q_net_hidden_layers: [64]
+
+eval:
+  eval_freq: 10000
+  n_eval_episodes: 10
+
+checkpoint:
+  checkpoint_freq: 5000
+
+logging:
+  log_interval: 500

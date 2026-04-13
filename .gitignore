@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Poetry / virtualenv
+.venv/
+poetry.lock
+
+# Outputs
+outputs/
+*.png
+*.pdf
+*.csv
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

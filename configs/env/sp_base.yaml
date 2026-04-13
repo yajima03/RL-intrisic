@@ -1,0 +1,23 @@
+env_name: "ScalablePyramid-v0"
+
+image_size: 32
+sigma_range: [1.0, 3.0]
+coeff_range: [-1.0, 1.0]
+obs_noise_std: 0.0
+
+param:
+  depth: 8
+  hyperplane_dim: 2
+  start_random: true
+  general_seed: 42
+
+  features:
+    seed: 1234
+
+  rewards:
+    depth: [8]
+    coordinates:
+      - [1, 7]
+    value: [1.0]
+    type: ["fix"]
+    var: [0.0]

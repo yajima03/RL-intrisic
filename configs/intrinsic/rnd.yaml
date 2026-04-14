@@ -2,27 +2,29 @@ name: "rnd"
 coef: 0.01
 
 learning_rate: 1.0e-4
-embedding_dim: 64
-hidden_dim: 256
-activation: "relu"
-
-normalize_reward: false
-reward_rms_alpha: 0.99
-intrinsic_clip: null
+normalize_reward: true
+reward_gamma: 0.99
+reward_norm_eps: 1.0e-8
+intrinsic_clip: 5.0
 
 device: "auto"
 seed: 0
 
-conv_layers:
-  - out_channels: 32
-    kernel_size: 5
-    stride: 2
-    padding: 2
-  - out_channels: 32
-    kernel_size: 3
-    stride: 2
-    padding: 2
-  - out_channels: 64
-    kernel_size: 3
-    stride: 1
-    padding: 1
+network:
+  activation: "relu"
+  embedding_dim: 64
+  conv_layers:
+    - out_channels: 32
+      kernel_size: 5
+      stride: 2
+      padding: 2
+    - out_channels: 32
+      kernel_size: 3
+      stride: 2
+      padding: 2
+    - out_channels: 64
+      kernel_size: 3
+      stride: 1
+      padding: 1
+  target_fc_layers: [256]
+  predictor_fc_layers: [256, 256, 256]

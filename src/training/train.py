@@ -69,6 +69,28 @@ DEFAULT_INTRINSIC_CONFIG: Dict[str, Any] = {
     "coef": 0.0,
 }
 
+MONITOR_INFO_KEYS: Sequence[str] = (
+    "episode_external_return",
+    "episode_intrinsic_return",
+    "episode_total_return",
+)
+
+
+class ZeroIntrinsicReward:
+    """No-op intrinsic module for keeping eval/train monitor columns aligned."""
+
+    def reset_episode(self) -> None:
+        return None
+
+    def compute(
+        self,
+        *,
+        observation=None,
+        info=None,
+        action=None,
+    ) -> float:
+        return 0.0
+
 
 def _deep_update(base: Dict[str, Any], updates: Mapping[str, Any]) -> Dict[str, Any]:
     for key, value in updates.items():
@@ -333,16 +355,14 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any]):
             use_state_action=bool(intrinsic_config.get("use_state_action", False)),
         )
         return CountBasedBonus(config), coef, intrinsic_config
-    
+
     if intrinsic_name in {"rnd", "random_network_distillation"}:
         rnd_config = RNDConfig(
             learning_rate=float(intrinsic_config.get("learning_rate", 1.0e-4)),
             embedding_dim=int(intrinsic_config.get("embedding_dim", 64)),
-            hidden_dim=int(intrinsic_config.get("hidden_dim", 256)),
             conv_layers=intrinsic_config.get("conv_layers", None),
             activation=str(intrinsic_config.get("activation", "relu")),
             normalize_reward=bool(intrinsic_config.get("normalize_reward", False)),
-            reward_rms_alpha=float(intrinsic_config.get("reward_rms_alpha", 0.99)),
             intrinsic_clip=(
                 None
                 if intrinsic_config.get("intrinsic_clip", None) is None
@@ -453,21 +473,45 @@ def make_train_env(
             intrinsic_module=intrinsic_module,
             intrinsic_coef=intrinsic_coef,
         )
+    else:
+        env = RewardWrapper(
+            env,
+            intrinsic_module=ZeroIntrinsicReward(),
+            intrinsic_coef=0.0,
+        )
 
-    env = Monitor(env, filename=str(monitor_path))
+    env = Monitor(
+        env,
+        filename=str(monitor_path),
+        info_keywords=MONITOR_INFO_KEYS,
+    )
     return env, intrinsic_cfg
 
 
-
-def make_eval_env(*, env_config: Dict[str, Any], algo_config: Dict[str, Any], monitor_path: Path):
-    # Evaluation uses only external reward to measure actual task performance.
+def make_eval_env(
+    *,
+    env_config: Dict[str, Any],
+    algo_config: Dict[str, Any],
+    monitor_path: Path,
+):
     env = make_env(
         config=env_config,
         seed=int(algo_config.get("seed", 0)) + 10_000,
         record_episode_statistics=False,
         monitor=False,
     )
-    env = Monitor(env, filename=str(monitor_path))
+
+    env = RewardWrapper(
+        env,
+        intrinsic_module=ZeroIntrinsicReward(),
+        intrinsic_coef=0.0,
+    )
+
+    env = Monitor(
+        env,
+        filename=str(monitor_path),
+        info_keywords=MONITOR_INFO_KEYS,
+    )
     return env
 
 
@@ -507,7 +551,11 @@ def main() -> None:
         monitor_path=eval_monitor_path,
     )
 
-    model = build_dqn_model(train_env=train_env, algo_config=algo_config, tensorboard_log=run_dirs["tensorboard"])
+    model = build_dqn_model(
+        train_env=train_env,
+        algo_config=algo_config,
+        tensorboard_log=run_dirs["tensorboard"],
+    )
     callbacks = build_callbacks(algo_config=algo_config, run_dirs=run_dirs, eval_env=eval_env)
 
     model.learn(
@@ -532,7 +580,7 @@ def main() -> None:
         "intrinsic_name": intrinsic_config.get("name", "none"),
         "intrinsic": intrinsic_cfg,
     }
-    
+
     with (run_dirs["run_dir"] / "run_summary.json").open("w", encoding="utf-8") as f:
         json.dump(run_summary, f, indent=2, ensure_ascii=False)
 

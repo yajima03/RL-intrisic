@@ -12,12 +12,12 @@ import torch.nn as nn
 import yaml
 from gymnasium import spaces
 from stable_baselines3 import DQN
-from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from src.intrinsic.count_bonus import CountBasedBonus, CountBonusConfig
-from src.intrinsic.rnd import RNDConfig, RNDIntrinsicReward
+from src.intrinsic.rnd import RNDConfig, RNDIntrinsicReward, RNDAugmentedDQN
 from src.training.make_env import load_env_config, make_env
 from src.training.reward_wrapper import RewardWrapper
 
@@ -90,6 +90,69 @@ class ZeroIntrinsicReward:
         action=None,
     ) -> float:
         return 0.0
+
+
+class EnvStatusLoggingCallback(BaseCallback):
+    """Periodic callback for env-status CSV logging.
+
+    - Uses env.fprint_env_status() to dump full environment status every log_interval
+    - Uses env.fprint_env_rnd() to append one column of raw intrinsic reward per state
+      into a single CSV across the run
+    """
+
+    def __init__(
+        self,
+        *,
+        train_env,
+        run_log_dir: Path,
+        log_interval: int,
+        intrinsic_module=None,
+        verbose: int = 0,
+    ):
+        super().__init__(verbose)
+        self.train_env = train_env
+        self.run_log_dir = Path(run_log_dir)
+        self.log_interval = int(log_interval)
+        self.intrinsic_module = intrinsic_module
+        self.raw_intrinsic_logname = "raw_intrinsic_history.csv"
+
+    def _on_step(self) -> bool:
+        if self.log_interval <= 0:
+            return True
+
+        if self.num_timesteps <= 0 or self.num_timesteps % self.log_interval != 0:
+            return True
+
+        base_env = self.train_env.unwrapped if hasattr(self.train_env, "unwrapped") else self.train_env
+
+        # 1) Full env status snapshot -> one csv per logging point
+        if hasattr(base_env, "fprint_env_status"):
+            try:
+                base_env.fprint_env_status(
+                    role="t",
+                    base_dir=str(self.run_log_dir),
+                    step_count=self.num_timesteps,
+                )
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"[EnvStatusLoggingCallback] fprint_env_status failed at step {self.num_timesteps}: {e}")
+
+        # 2) Raw intrinsic reward over all states -> one csv for the full run
+        if self.intrinsic_module is not None and hasattr(self.intrinsic_module, "export_raw_intrinsic_per_state"):
+            try:
+                raw_values = self.intrinsic_module.export_raw_intrinsic_per_state(base_env)
+                if hasattr(base_env, "fprint_env_rnd"):
+                    base_env.fprint_env_rnd(
+                        logname=self.raw_intrinsic_logname,
+                        step=self.num_timesteps,
+                        all_intrinsic=raw_values,
+                        base_dir=str(self.run_log_dir),
+                    )
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"[EnvStatusLoggingCallback] raw intrinsic logging failed at step {self.num_timesteps}: {e}")
+
+        return True
 
 
 def _deep_update(base: Dict[str, Any], updates: Mapping[str, Any]) -> Dict[str, Any]:
@@ -382,13 +445,13 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any]):
 
 
 
-def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Path) -> DQN:
+def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Path, intrinsic_module=None):
     if str(algo_config.get("policy", "CnnPolicy")) != "CnnPolicy":
         raise ValueError("This train.py currently supports only policy='CnnPolicy'.")
 
     policy_kwargs = build_policy_kwargs(algo_config)
 
-    model = DQN(
+    common_kwargs = dict(
         policy="CnnPolicy",
         env=train_env,
         learning_rate=float(algo_config.get("learning_rate", 1e-4)),
@@ -410,11 +473,21 @@ def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Pat
         device=str(algo_config.get("device", "auto")),
         verbose=1,
     )
-    return model
+
+    if isinstance(intrinsic_module, RNDIntrinsicReward):
+        return RNDAugmentedDQN(rnd_module=intrinsic_module, **common_kwargs)
+
+    return DQN(**common_kwargs)
 
 
-
-def build_callbacks(*, algo_config: Dict[str, Any], run_dirs: Dict[str, Path], eval_env) -> Optional[CallbackList]:
+def build_callbacks(
+    *,
+    algo_config: Dict[str, Any],
+    run_dirs: Dict[str, Path],
+    eval_env,
+    train_env,
+    intrinsic_module=None,
+) -> Optional[CallbackList]:
     callbacks = []
 
     checkpoint_freq = int(algo_config.get("checkpoint", {}).get("checkpoint_freq", 0))
@@ -445,6 +518,18 @@ def build_callbacks(*, algo_config: Dict[str, Any], run_dirs: Dict[str, Path], e
             )
         )
 
+    status_log_interval = int(algo_config.get("logging", {}).get("log_interval", 0))
+    if status_log_interval > 0:
+        callbacks.append(
+            EnvStatusLoggingCallback(
+                train_env=train_env,
+                run_log_dir=run_dirs["logs"],
+                log_interval=status_log_interval,
+                intrinsic_module=intrinsic_module,
+                verbose=1,
+            )
+        )
+
     if not callbacks:
         return None
     return CallbackList(callbacks)
@@ -467,6 +552,8 @@ def make_train_env(
 
     intrinsic_module, intrinsic_coef, intrinsic_cfg = build_intrinsic_module(intrinsic_config)
 
+    actual_intrinsic_module = intrinsic_module
+
     if intrinsic_module is not None:
         env = RewardWrapper(
             env,
@@ -485,7 +572,7 @@ def make_train_env(
         filename=str(monitor_path),
         info_keywords=MONITOR_INFO_KEYS,
     )
-    return env, intrinsic_cfg
+    return env, intrinsic_cfg, actual_intrinsic_module
 
 
 def make_eval_env(
@@ -539,7 +626,7 @@ def main() -> None:
     train_monitor_path = run_dirs["logs"] / "train_monitor.csv"
     eval_monitor_path = run_dirs["logs"] / "eval_monitor.csv"
 
-    train_env, intrinsic_cfg = make_train_env(
+    train_env, intrinsic_cfg, intrinsic_module = make_train_env(
         env_config=env_config,
         algo_config=algo_config,
         intrinsic_config=intrinsic_config,
@@ -555,8 +642,15 @@ def main() -> None:
         train_env=train_env,
         algo_config=algo_config,
         tensorboard_log=run_dirs["tensorboard"],
+        intrinsic_module=intrinsic_module,
     )
-    callbacks = build_callbacks(algo_config=algo_config, run_dirs=run_dirs, eval_env=eval_env)
+    callbacks = build_callbacks(
+        algo_config=algo_config,
+        run_dirs=run_dirs,
+        eval_env=eval_env,
+        train_env=train_env,
+        intrinsic_module=intrinsic_module,
+    )
 
     model.learn(
         total_timesteps=int(algo_config.get("total_timesteps", 100_000)),

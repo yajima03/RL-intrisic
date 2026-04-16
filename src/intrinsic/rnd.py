@@ -320,6 +320,35 @@ class RNDIntrinsicReward:
 
         return float(loss.detach().cpu().item())
 
+    def export_raw_intrinsic_per_state(self, env) -> np.ndarray:
+        """Return raw, pre-normalization, pre-coefficient intrinsic reward for all states."""
+        if self.target is None or self.predictor is None:
+            raise RuntimeError("RND networks are not initialized yet.")
+
+        base_env = env.unwrapped if hasattr(env, "unwrapped") else env
+
+        if hasattr(base_env, "export_all_observations"):
+            all_obs = base_env.export_all_observations()
+        else:
+            core = getattr(base_env, "core", None)
+            if core is None:
+                core = getattr(base_env, "env", None)
+            if core is None or not hasattr(core, "node_images"):
+                raise RuntimeError("Could not export all observations for RND logging.")
+            all_obs = np.asarray(core.node_images, dtype=np.float32)
+            all_obs = th.from_numpy(all_obs)
+
+        x = all_obs.to(self.device).float()
+        if x.ndim == 3:
+            x = x.unsqueeze(1)
+        if x.ndim != 4:
+            raise ValueError(f"Expected all observations with shape [N,C,H,W], got {tuple(x.shape)}")
+
+        with th.no_grad():
+            raw = self._raw_prediction_error(x)
+
+        return raw.detach().cpu().numpy().astype(np.float32)
+
 
 class RNDAugmentedDQN(DQN):
     """DQN that additionally updates an RND predictor from the same replay buffer batch."""

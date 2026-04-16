@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Hashable, Mapping, Optional, Tuple
+from typing import Any, Dict, Hashable, Mapping, Optional
 
 import numpy as np
 
@@ -83,20 +83,7 @@ class CountBasedBonus:
         info: Optional[Mapping[str, Any]] = None,
         action: Optional[int] = None,
     ) -> float:
-        """Update the count and return the intrinsic bonus for the new visit.
-
-        Parameters
-        ----------
-        observation:
-            Usually the *next* observation after the environment transition.
-            Used as a fallback key when ``info['node_id']`` is unavailable.
-        info:
-            Environment info dictionary. If it contains ``node_id``, that is used
-            as the canonical state identifier.
-        action:
-            Optional action that produced the new state. Only used when
-            ``use_state_action=True``.
-        """
+        """Update the count and return the intrinsic bonus for the new visit."""
         key = self._state_key(observation=observation, info=info, action=action)
         new_count = self._counts.get(key, 0) + 1
         self._counts[key] = new_count
@@ -105,6 +92,57 @@ class CountBasedBonus:
         power = float(self.config.power)
         bonus = 1.0 / (denom**power + float(self.config.eps))
         return float(bonus)
+
+    def export_raw_intrinsic_per_state(self, env) -> np.ndarray:
+        """Return raw count-based intrinsic reward for all states.
+
+        Notes
+        -----
+        - Returned values are **before** applying any global coefficient.
+        - When ``use_state_action=False``, this is simply state bonus.
+        - When ``use_state_action=True``, a single scalar per state is needed
+          for logging, so we use the **mean** over action-wise raw bonuses.
+        """
+        base_env = env.unwrapped if hasattr(env, "unwrapped") else env
+        core = getattr(base_env, "core", None)
+        if core is None:
+            core = getattr(base_env, "env", None)
+        if core is None or not hasattr(core, "nodes"):
+            raise RuntimeError("Could not access core environment for count bonus logging.")
+
+        power = float(self.config.power)
+        eps = float(self.config.eps)
+
+        def _bonus_from_count(count_value: int) -> float:
+            if count_value <= 0:
+                return 1.0 / (1.0**power + eps)
+            return 1.0 / ((float(count_value) ** power) + eps)
+
+        values = []
+
+        if not self.config.use_state_action:
+            for node_id, _node in enumerate(core.nodes):
+                count_value = int(self._counts.get(int(node_id), 0))
+                values.append(_bonus_from_count(count_value))
+            return np.asarray(values, dtype=np.float32)
+
+        action_space_size = None
+        if hasattr(core, "action_space_size"):
+            action_space_size = int(core.action_space_size)
+        elif hasattr(base_env, "action_space") and hasattr(base_env.action_space, "n"):
+            action_space_size = int(base_env.action_space.n)
+
+        if action_space_size is None:
+            raise RuntimeError("Could not infer action_space_size for state-action count logging.")
+
+        for node_id, _node in enumerate(core.nodes):
+            action_vals = []
+            for action_id in range(action_space_size):
+                count_value = int(self._counts.get((int(node_id), int(action_id)), 0))
+                action_vals.append(_bonus_from_count(count_value))
+            values.append(float(np.mean(action_vals)))
+
+        return np.asarray(values, dtype=np.float32)
 
     def snapshot(self) -> Dict[str, Any]:
         return {

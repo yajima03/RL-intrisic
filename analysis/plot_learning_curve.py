@@ -10,6 +10,14 @@ import numpy as np
 import pandas as pd
 
 
+"""
+train_monitor.csv と eval_monitor.csv を読み込んで、各種指標を時系列でプロットするスクリプト。
+
+使い方:
+    uv run python -m analysis.plot_learning_curve  --run-dir outputs/intrinsic_sp_base_dqn_none      
+"""
+
+
 @dataclass
 class PlotConfig:
     smoothing_window: int = 20

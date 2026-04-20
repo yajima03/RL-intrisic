@@ -1,1 +1,38 @@
-intrinsic_name: "pglp_local"
+name: "pglp_local"
+coef: 1.0
+
+learning_rate: 1.0e-5
+embedding_dim: 64
+activation: "relu"
+device: "auto"
+seed: 0
+
+encoder_fc_layers: [256]
+predictor_fc_layers: [256, 256]
+
+conv_layers:
+  - out_channels: 32
+    kernel_size: 5
+    stride: 2
+    padding: 2
+  - out_channels: 32
+    kernel_size: 3
+    stride: 2
+    padding: 2
+  - out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1
+
+candidate_size: 512
+knn_k: 32
+min_candidates: 16
+cache_capacity_per_action: 2000
+key_encoder_tau: 0.01
+gate_lambda: 0.01
+
+num_prototypes_per_action: 8
+prototype_center_tau: 0.05
+prototype_min_count: 4
+progress_ema_alpha: 0.9995
+progress_short_ema_alpha: 0.5

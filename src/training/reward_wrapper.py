@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Protocol, Tuple
+import inspect 
+from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
 import numpy as np
-from gymnasium import Wrapper
+import gymnasium as gym
 
 
+@runtime_checkable
 class IntrinsicRewardModule(Protocol):
     def reset_episode(self) -> None: ...
 
@@ -18,71 +20,81 @@ class IntrinsicRewardModule(Protocol):
     ) -> float: ...
 
 
-class RewardWrapper(Wrapper):
-    """Add intrinsic reward on top of the environment's external reward.
+class RewardWrapper(gym.Wrapper):
+    """Combine external reward with intrinsic reward.
 
-    The wrapped environment is expected to expose the external reward in the
-    standard Gymnasium ``step`` return. The wrapper returns
-
-    ``r_total = r_ext + intrinsic_coef * r_int``.
-
-    It also records the following values into ``info``:
-
-    - ``external_reward``
-    - ``intrinsic_reward``
-    - ``total_reward``
-    - ``episode_external_return``
-    - ``episode_intrinsic_return``
-    - ``episode_total_return``
+    This wrapper also tracks per-episode external/intrinsic/total returns and
+    stores them in ``info`` at episode end so Monitor can write them to CSV.
     """
 
-    def __init__(self, env, intrinsic_module: IntrinsicRewardModule, intrinsic_coef: float = 1.0):
+    def __init__(
+        self,
+        env: gym.Env,
+        *,
+        intrinsic_module: IntrinsicRewardModule,
+        intrinsic_coef: float = 1.0,
+    ) -> None:
         super().__init__(env)
         self.intrinsic_module = intrinsic_module
         self.intrinsic_coef = float(intrinsic_coef)
+
         self.episode_external_return = 0.0
         self.episode_intrinsic_return = 0.0
         self.episode_total_return = 0.0
+        self._last_observation: Optional[np.ndarray] = None
+        self._compute_accepts_previous = self._check_accepts_previous_observation()
+
+    def _check_accepts_previous_observation(self) -> bool:
+        try:
+            sig = inspect.signature(self.intrinsic_module.compute)
+            return "previous_observation" in sig.parameters
+        except (TypeError, ValueError):
+            return False
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self.episode_external_return = 0.0
         self.episode_intrinsic_return = 0.0
         self.episode_total_return = 0.0
+        self._last_observation = np.array(obs, copy=True)
         self.intrinsic_module.reset_episode()
-        info = dict(info)
-        info.setdefault("external_reward", 0.0)
-        info.setdefault("intrinsic_reward", 0.0)
-        info.setdefault("total_reward", 0.0)
         return obs, info
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+    def step(self, action):
         obs, ext_reward, terminated, truncated, info = self.env.step(action)
-        info = dict(info)
+        if info is None:
+            info = {}
+        else:
+            info = dict(info)
 
-        intrinsic_raw = float(
-            self.intrinsic_module.compute(
-                observation=np.asarray(obs),
+        if hasattr(self.env, "action_space") and hasattr(self.env.action_space, "n"):
+            info.setdefault("action_space_n", int(self.env.action_space.n))
+
+        if self._compute_accepts_previous:
+            raw_intrinsic = self.intrinsic_module.compute(
+                previous_observation=self._last_observation,
+                observation=obs,
                 info=info,
-                action=int(action),
+                action=action,
             )
-        )
-        intrinsic_reward = self.intrinsic_coef * intrinsic_raw
-        total_reward = float(ext_reward) + float(intrinsic_reward)
+        else:
+            raw_intrinsic = self.intrinsic_module.compute(
+                observation=obs,
+                info=info,
+                action=action,
+            )
+        intrinsic_reward = float(self.intrinsic_coef) * float(raw_intrinsic)
+        total_reward = float(ext_reward) + intrinsic_reward
 
         self.episode_external_return += float(ext_reward)
-        self.episode_intrinsic_return += float(intrinsic_reward)
-        self.episode_total_return += float(total_reward)
+        self.episode_intrinsic_return += intrinsic_reward
+        self.episode_total_return += total_reward
 
-        info["external_reward"] = float(ext_reward)
-        info["intrinsic_reward_raw"] = intrinsic_raw
-        info["intrinsic_reward"] = float(intrinsic_reward)
-        info["total_reward"] = float(total_reward)
-        info["intrinsic_coef"] = float(self.intrinsic_coef)
-
-        if terminated or truncated:
+        done = bool(terminated or truncated)
+        if done:
             info["episode_external_return"] = float(self.episode_external_return)
             info["episode_intrinsic_return"] = float(self.episode_intrinsic_return)
             info["episode_total_return"] = float(self.episode_total_return)
 
+        self._last_observation = np.array(obs, copy=True)
         return obs, total_reward, terminated, truncated, info

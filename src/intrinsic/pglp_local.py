@@ -83,6 +83,11 @@ class PGLPLocalConfig:
     progress_ema_alpha: float = 0.99
     progress_short_ema_alpha: float = 0.90
 
+    # intrinsic coefficient schedule
+    initial_coef: float = 1.0
+    final_coef: float = 1.0
+    coef_decay_steps: int = 1
+
     device: str = "auto"
     seed: Optional[int] = None
 
@@ -185,6 +190,7 @@ class PGLPLocalIntrinsicReward:
     PGLP-local with:
       - local predictability gate from same-action + latent k-NN
       - online prototype-based progress
+      - linear intrinsic coefficient decay
 
     Raw intrinsic reward:
         gate_t * progress_t
@@ -193,6 +199,9 @@ class PGLPLocalIntrinsicReward:
         gate_t     = exp(-lambda * u_t)
         progress_t = max(proto.ema_long - proto.ema_short, 0)
         proto      = nearest prototype for current (state_key, action)
+
+    Final intrinsic reward passed to the agent is handled by RewardWrapper as:
+        current_coef() * raw_intrinsic
     """
 
     def __init__(self, config: PGLPLocalConfig) -> None:
@@ -208,22 +217,32 @@ class PGLPLocalIntrinsicReward:
         self.cache_by_action: Dict[int, Deque[_TransitionCacheEntry]] = {}
         self.prototypes_by_action: Dict[int, List[_PrototypeEntry]] = {}
 
+        self._env_step_count: int = 0
+
         # debug accumulators
         self._debug_sums: Dict[str, float] = {
             "gate": 0.0,
             "progress": 0.0,
             "raw_intrinsic": 0.0,
             "current_error": 0.0,
+            "current_coef": 0.0,
             "neighbor_count": 0.0,
             "prototype_count_for_action": 0.0,
             "prototype_long": 0.0,
             "prototype_short": 0.0,
             "prototype_index": 0.0,
+            "signed_gap": 0.0,
+            "positive_gap": 0.0,
         }
         self._debug_count: int = 0
 
     def reset_episode(self) -> None:
         return None
+
+    def current_coef(self) -> float:
+        decay_steps = max(int(self.config.coef_decay_steps), 1)
+        t = min(float(self._env_step_count) / float(decay_steps), 1.0)
+        return float(self.config.initial_coef + t * (self.config.final_coef - self.config.initial_coef))
 
     def _default_conv_layers(self) -> Sequence[Mapping[str, Any]]:
         return [
@@ -378,19 +397,21 @@ class PGLPLocalIntrinsicReward:
 
     def _get_prototype_progress(
         self, action: int, state_key: np.ndarray
-    ) -> tuple[Optional[float], Optional[int], Optional[float], Optional[float]]:
+    ) -> tuple[Optional[float], Optional[int], Optional[float], Optional[float], Optional[float], Optional[float]]:
         idx = self._nearest_prototype_index(action, state_key)
         if idx is None:
-            return None, None, None, None
+            return None, None, None, None, None, None
 
         proto = self.prototypes_by_action[int(action)][idx]
         long_v = float(proto.ema_long)
         short_v = float(proto.ema_short)
+        signed_gap = float(long_v - short_v)
+        positive_gap = float(max(signed_gap, 0.0))
 
         if proto.count < int(self.config.prototype_min_count):
-            return None, idx, long_v, short_v
+            return None, idx, long_v, short_v, signed_gap, positive_gap
 
-        return max(long_v - short_v, 0.0), idx, long_v, short_v
+        return positive_gap, idx, long_v, short_v, signed_gap, positive_gap
 
     def _update_or_create_prototype(
         self,
@@ -442,21 +463,27 @@ class PGLPLocalIntrinsicReward:
         progress: float,
         raw_intrinsic: float,
         current_error: float,
+        current_coef: float,
         neighbor_count: int,
         prototype_count_for_action: int,
         prototype_long: float,
         prototype_short: float,
         prototype_index: float,
+        signed_gap: float,
+        positive_gap: float,
     ) -> None:
         self._debug_sums["gate"] += float(gate)
         self._debug_sums["progress"] += float(progress)
         self._debug_sums["raw_intrinsic"] += float(raw_intrinsic)
         self._debug_sums["current_error"] += float(current_error)
+        self._debug_sums["current_coef"] += float(current_coef)
         self._debug_sums["neighbor_count"] += float(neighbor_count)
         self._debug_sums["prototype_count_for_action"] += float(prototype_count_for_action)
         self._debug_sums["prototype_long"] += float(prototype_long)
         self._debug_sums["prototype_short"] += float(prototype_short)
         self._debug_sums["prototype_index"] += float(prototype_index)
+        self._debug_sums["signed_gap"] += float(signed_gap)
+        self._debug_sums["positive_gap"] += float(positive_gap)
         self._debug_count += 1
 
     def flush_debug_stats(self) -> Dict[str, float]:
@@ -466,11 +493,14 @@ class PGLPLocalIntrinsicReward:
                 "mean_progress": 0.0,
                 "mean_raw_intrinsic": 0.0,
                 "mean_current_error": 0.0,
+                "mean_current_coef": 0.0,
                 "mean_neighbor_count": 0.0,
                 "mean_prototype_count_for_action": 0.0,
                 "mean_prototype_long": 0.0,
                 "mean_prototype_short": 0.0,
                 "mean_prototype_index": -1.0,
+                "mean_signed_gap": 0.0,
+                "mean_positive_gap": 0.0,
                 "num_samples": 0.0,
             }
 
@@ -480,11 +510,14 @@ class PGLPLocalIntrinsicReward:
             "mean_progress": self._debug_sums["progress"] / n,
             "mean_raw_intrinsic": self._debug_sums["raw_intrinsic"] / n,
             "mean_current_error": self._debug_sums["current_error"] / n,
+            "mean_current_coef": self._debug_sums["current_coef"] / n,
             "mean_neighbor_count": self._debug_sums["neighbor_count"] / n,
             "mean_prototype_count_for_action": self._debug_sums["prototype_count_for_action"] / n,
             "mean_prototype_long": self._debug_sums["prototype_long"] / n,
             "mean_prototype_short": self._debug_sums["prototype_short"] / n,
             "mean_prototype_index": self._debug_sums["prototype_index"] / n,
+            "mean_signed_gap": self._debug_sums["signed_gap"] / n,
+            "mean_positive_gap": self._debug_sums["positive_gap"] / n,
             "num_samples": n,
         }
 
@@ -515,6 +548,7 @@ class PGLPLocalIntrinsicReward:
 
         _, _, _, e_t = self._prediction_error_tensor(prev_x, next_x, action_t)
         current_error = float(e_t.detach().cpu().item())
+        coef_now = self.current_coef()
 
         state_key = self._encode_key(prev_x).detach().cpu().numpy()[0].astype(np.float32)
         next_state_key = self._encode_key(next_x).detach().cpu().numpy()[0].astype(np.float32)
@@ -525,7 +559,9 @@ class PGLPLocalIntrinsicReward:
             neighbors=neighbors,
         )
 
-        progress, proto_idx, proto_long, proto_short = self._get_prototype_progress(int(action), state_key)
+        progress, proto_idx, proto_long, proto_short, signed_gap, positive_gap = self._get_prototype_progress(
+            int(action), state_key
+        )
         if progress is None:
             progress = 0.0
         if proto_idx is None:
@@ -534,6 +570,10 @@ class PGLPLocalIntrinsicReward:
             proto_long = 0.0
         if proto_short is None:
             proto_short = 0.0
+        if signed_gap is None:
+            signed_gap = 0.0
+        if positive_gap is None:
+            positive_gap = 0.0
 
         raw = gate * float(progress)
 
@@ -543,11 +583,14 @@ class PGLPLocalIntrinsicReward:
             progress=float(progress),
             raw_intrinsic=float(raw),
             current_error=current_error,
+            current_coef=coef_now,
             neighbor_count=len(neighbors),
             prototype_count_for_action=len(self.prototypes_by_action.get(int(action), [])),
             prototype_long=float(proto_long),
             prototype_short=float(proto_short),
             prototype_index=float(proto_idx),
+            signed_gap=float(signed_gap),
+            positive_gap=float(positive_gap),
         )
 
         # cache update
@@ -566,6 +609,7 @@ class PGLPLocalIntrinsicReward:
             error=current_error,
         )
 
+        self._env_step_count += 1
         return float(raw)
 
     def update_from_batch(
@@ -667,7 +711,7 @@ class PGLPLocalIntrinsicReward:
                     neighbors=neighbors,
                 )
 
-                progress, _, _, _ = self._get_prototype_progress(action, state_key)
+                progress, _, _, _, _, _ = self._get_prototype_progress(action, state_key)
                 if progress is None:
                     per_action.append(0.0)
                     continue

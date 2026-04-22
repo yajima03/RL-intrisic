@@ -1,5 +1,7 @@
 name: "pglp_local"
-coef: 1.0
+
+initial_coef: 1.0
+final_coef: 0.1
 
 learning_rate: 1.0e-5
 embedding_dim: 64

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import inspect 
+import inspect
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
 import numpy as np
@@ -43,6 +43,7 @@ class RewardWrapper(gym.Wrapper):
         self.episode_total_return = 0.0
         self._last_observation: Optional[np.ndarray] = None
         self._compute_accepts_previous = self._check_accepts_previous_observation()
+        self._has_dynamic_coef = self._check_has_dynamic_coef()
 
     def _check_accepts_previous_observation(self) -> bool:
         try:
@@ -50,6 +51,9 @@ class RewardWrapper(gym.Wrapper):
             return "previous_observation" in sig.parameters
         except (TypeError, ValueError):
             return False
+
+    def _check_has_dynamic_coef(self) -> bool:
+        return hasattr(self.intrinsic_module, "current_coef") and callable(getattr(self.intrinsic_module, "current_coef"))
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -70,6 +74,10 @@ class RewardWrapper(gym.Wrapper):
         if hasattr(self.env, "action_space") and hasattr(self.env.action_space, "n"):
             info.setdefault("action_space_n", int(self.env.action_space.n))
 
+        coef = float(self.intrinsic_coef)
+        if self._has_dynamic_coef:
+            coef = float(self.intrinsic_module.current_coef())
+
         if self._compute_accepts_previous:
             raw_intrinsic = self.intrinsic_module.compute(
                 previous_observation=self._last_observation,
@@ -83,7 +91,7 @@ class RewardWrapper(gym.Wrapper):
                 info=info,
                 action=action,
             )
-        intrinsic_reward = float(self.intrinsic_coef) * float(raw_intrinsic)
+        intrinsic_reward = coef * float(raw_intrinsic)
         total_reward = float(ext_reward) + intrinsic_reward
 
         self.episode_external_return += float(ext_reward)

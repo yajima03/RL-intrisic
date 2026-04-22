@@ -136,11 +136,14 @@ class EnvStatusLoggingCallback(BaseCallback):
                     "mean_progress",
                     "mean_raw_intrinsic",
                     "mean_current_error",
+                    "mean_current_coef",
                     "mean_neighbor_count",
                     "mean_prototype_count_for_action",
                     "mean_prototype_long",
                     "mean_prototype_short",
                     "mean_prototype_index",
+                    "mean_signed_gap",
+                    "mean_positive_gap",
                     "num_samples",
                 ]
             )
@@ -155,11 +158,14 @@ class EnvStatusLoggingCallback(BaseCallback):
                     stats.get("mean_progress", 0.0),
                     stats.get("mean_raw_intrinsic", 0.0),
                     stats.get("mean_current_error", 0.0),
+                    stats.get("mean_current_coef", 0.0),
                     stats.get("mean_neighbor_count", 0.0),
                     stats.get("mean_prototype_count_for_action", 0.0),
                     stats.get("mean_prototype_long", 0.0),
                     stats.get("mean_prototype_short", 0.0),
                     stats.get("mean_prototype_index", -1.0),
+                    stats.get("mean_signed_gap", 0.0),
+                    stats.get("mean_positive_gap", 0.0),
                     stats.get("num_samples", 0.0),
                 ]
             )
@@ -460,8 +466,7 @@ def build_policy_kwargs(algo_config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-
-def build_intrinsic_module(intrinsic_config: Dict[str, Any]):
+def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Optional[Dict[str, Any]] = None):
     intrinsic_name = str(intrinsic_config.get("name", "none")).lower()
     coef = float(intrinsic_config.get("coef", 1.0))
 
@@ -498,6 +503,15 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any]):
         return RNDIntrinsicReward(rnd_config), coef, intrinsic_config
 
     if intrinsic_name in {"pglp_local", "pglp-local", "pglp"}:
+        initial_coef = float(intrinsic_config.get("initial_coef", intrinsic_config.get("coef", 1.0)))
+        final_coef = float(intrinsic_config.get("final_coef", initial_coef))
+        coef_decay_steps = int(
+            intrinsic_config.get(
+                "coef_decay_steps",
+                (algo_config or {}).get("total_timesteps", 1),
+            )
+        )
+
         pglp_config = PGLPLocalConfig(
             learning_rate=float(intrinsic_config.get("learning_rate", 1.0e-4)),
             conv_layers=intrinsic_config.get("conv_layers", None),
@@ -516,6 +530,9 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any]):
             prototype_min_count=int(intrinsic_config.get("prototype_min_count", 4)),
             progress_ema_alpha=float(intrinsic_config.get("progress_ema_alpha", 0.99)),
             progress_short_ema_alpha=float(intrinsic_config.get("progress_short_ema_alpha", 0.9)),
+            initial_coef=initial_coef,
+            final_coef=final_coef,
+            coef_decay_steps=coef_decay_steps,
             device=str(intrinsic_config.get("device", "auto")),
             seed=(
                 None
@@ -523,7 +540,8 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any]):
                 else int(intrinsic_config.get("seed"))
             ),
         )
-        return PGLPLocalIntrinsicReward(pglp_config), coef, intrinsic_config
+        # Dynamic coef is handled inside PGLP + RewardWrapper, so the outer wrapper coef should be neutral.
+        return PGLPLocalIntrinsicReward(pglp_config), 1.0, intrinsic_config
 
     raise ValueError(f"Unsupported intrinsic reward name: {intrinsic_name}")
 
@@ -638,8 +656,7 @@ def make_train_env(
         monitor=False,
     )
 
-    intrinsic_module, intrinsic_coef, intrinsic_cfg = build_intrinsic_module(intrinsic_config)
-
+    intrinsic_module, intrinsic_coef, intrinsic_cfg = build_intrinsic_module(intrinsic_config, algo_config)
     actual_intrinsic_module = intrinsic_module
 
     if intrinsic_module is not None:

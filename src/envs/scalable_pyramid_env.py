@@ -339,7 +339,7 @@ class ScalablePyramidCore:
     def reset(self) -> np.ndarray:
         start_candidates = [i for i, node in enumerate(self.nodes) if node.depth == 0]
         if self.start_random and start_candidates:
-            self.current_node_idx = int(self.feature_rng.choice(start_candidates))
+            self.current_node_idx = int(self.general_rng.choice(start_candidates))
         else:
             self.current_node_idx = start_candidates[0] if start_candidates else 0
         self.nodes[self.current_node_idx].count()

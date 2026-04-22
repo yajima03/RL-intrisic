@@ -1,0 +1,12 @@
+env_name: "MiniGrid-DoorKey-8x8-v0"
+env_family: "minigrid"
+
+render_mode: null
+
+observation:
+  image_only: true
+  channel_first: true
+  fully_observable: true
+
+seeds:
+  env_seed: 42

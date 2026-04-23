@@ -1,5 +1,5 @@
 name: "rnd"
-coef: 0.01
+coef: 0.05
 
 learning_rate: 1.0e-4
 normalize_reward: true

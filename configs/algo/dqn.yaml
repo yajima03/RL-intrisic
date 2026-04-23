@@ -6,9 +6,9 @@ seed: 0
 progress_bar: true
 deterministic_eval: true
 
-total_timesteps: 30000
-buffer_size: 10000
-learning_starts: 5000
+total_timesteps: 50000
+buffer_size: 50000
+learning_starts: 1000
 train_freq: 4
 gradient_steps: 4
 batch_size: 32
@@ -16,7 +16,7 @@ batch_size: 32
 learning_rate: 1.0e-4
 tau: 1.0
 gamma: 1.0
-exploration_fraction: 0.75
+exploration_fraction: 0.1
 exploration_initial_eps: 1
 exploration_final_eps: 0.05
 target_update_interval: 200

@@ -88,6 +88,16 @@ class PGLPLocalConfig:
     final_coef: float = 1.0
     coef_decay_steps: int = 1
 
+    # predictor-side observation normalization
+    normalize_observation: bool = False
+    observation_norm_clip: float = 5.0
+    observation_norm_epsilon: float = 1.0e-8
+
+    # RL-side intrinsic reward normalization
+    normalize_reward: bool = False
+    reward_norm_epsilon: float = 1.0e-8
+    reward_norm_clip: Optional[float] = None
+
     device: str = "auto"
     seed: Optional[int] = None
 
@@ -236,6 +246,16 @@ class PGLPLocalIntrinsicReward:
         }
         self._debug_count: int = 0
 
+        # running stats for predictor-side observation normalization
+        self._obs_norm_count: int = 0
+        self._obs_norm_mean: Optional[np.ndarray] = None
+        self._obs_norm_m2: Optional[np.ndarray] = None
+
+        # running stats for RL-side intrinsic reward normalization
+        self._reward_norm_count: int = 0
+        self._reward_norm_mean: float = 0.0
+        self._reward_norm_m2: float = 0.0
+
     def reset_episode(self) -> None:
         return None
 
@@ -258,6 +278,87 @@ class PGLPLocalIntrinsicReward:
         elif obs.ndim != 3:
             raise ValueError(f"PGLP expects observation with shape (C,H,W) or (H,W), got {obs.shape}")
         return obs
+
+
+    def _update_obs_running_stats(self, obs_chw: np.ndarray) -> None:
+        if not bool(self.config.normalize_observation):
+            return
+
+        x = np.asarray(obs_chw, dtype=np.float64)
+        if self._obs_norm_mean is None:
+            self._obs_norm_count = 1
+            self._obs_norm_mean = x.copy()
+            self._obs_norm_m2 = np.zeros_like(x, dtype=np.float64)
+            return
+
+        self._obs_norm_count += 1
+        delta = x - self._obs_norm_mean
+        self._obs_norm_mean += delta / float(self._obs_norm_count)
+        delta2 = x - self._obs_norm_mean
+        assert self._obs_norm_m2 is not None
+        self._obs_norm_m2 += delta * delta2
+
+    def _normalize_observation_array(self, obs_chw: np.ndarray) -> np.ndarray:
+        obs = np.asarray(obs_chw, dtype=np.float32)
+        if not bool(self.config.normalize_observation):
+            return obs
+        if self._obs_norm_mean is None or self._obs_norm_m2 is None or self._obs_norm_count < 2:
+            return obs
+
+        var = self._obs_norm_m2 / float(max(self._obs_norm_count - 1, 1))
+        std = np.sqrt(np.maximum(var, 0.0) + float(self.config.observation_norm_epsilon))
+        normed = (obs.astype(np.float64) - self._obs_norm_mean) / std
+        clip_v = float(self.config.observation_norm_clip)
+        normed = np.clip(normed, -clip_v, clip_v)
+        return normed.astype(np.float32)
+
+    def _normalize_observation_tensor(self, obs: th.Tensor) -> th.Tensor:
+        if not bool(self.config.normalize_observation):
+            return obs
+        if self._obs_norm_mean is None or self._obs_norm_m2 is None or self._obs_norm_count < 2:
+            return obs
+
+        mean_t = th.as_tensor(self._obs_norm_mean, dtype=obs.dtype, device=obs.device).unsqueeze(0)
+        var = self._obs_norm_m2 / float(max(self._obs_norm_count - 1, 1))
+        std_t = th.as_tensor(
+            np.sqrt(np.maximum(var, 0.0) + float(self.config.observation_norm_epsilon)),
+            dtype=obs.dtype,
+            device=obs.device,
+        ).unsqueeze(0)
+        normed = (obs - mean_t) / std_t
+        clip_v = float(self.config.observation_norm_clip)
+        return th.clamp(normed, min=-clip_v, max=clip_v)
+
+    def _update_reward_running_stats(self, raw_intrinsic: float) -> None:
+        x = float(raw_intrinsic)
+        self._reward_norm_count += 1
+        if self._reward_norm_count == 1:
+            self._reward_norm_mean = x
+            self._reward_norm_m2 = 0.0
+            return
+
+        delta = x - self._reward_norm_mean
+        self._reward_norm_mean += delta / float(self._reward_norm_count)
+        delta2 = x - self._reward_norm_mean
+        self._reward_norm_m2 += delta * delta2
+
+    def normalize_raw_intrinsic_for_rl(self, raw_intrinsic: float) -> float:
+        x = float(raw_intrinsic)
+        if not bool(self.config.normalize_reward):
+            return x
+
+        self._update_reward_running_stats(x)
+        if self._reward_norm_count < 2:
+            out = x
+        else:
+            var = self._reward_norm_m2 / float(max(self._reward_norm_count - 1, 1))
+            std = float(np.sqrt(max(var, 0.0) + float(self.config.reward_norm_epsilon)))
+            out = x / std
+
+        if self.config.reward_norm_clip is not None:
+            clip_v = float(self.config.reward_norm_clip)
+            out = float(np.clip(out, -clip_v, clip_v))
+        return float(out)
 
     def _infer_action_dim(self, info: Optional[dict[str, Any]]) -> int:
         if self.action_dim is not None:
@@ -537,10 +638,13 @@ class PGLPLocalIntrinsicReward:
         if previous_observation is None or observation is None or action is None:
             return 0.0
 
-        prev_chw = self._preprocess_single_observation(previous_observation)
-        obs_chw = self._preprocess_single_observation(observation)
+        prev_chw_raw = self._preprocess_single_observation(previous_observation)
+        obs_chw_raw = self._preprocess_single_observation(observation)
         action_dim = self._infer_action_dim(info)
-        self._ensure_networks(prev_chw, action_dim=action_dim)
+        self._ensure_networks(prev_chw_raw, action_dim=action_dim)
+
+        prev_chw = self._normalize_observation_array(prev_chw_raw)
+        obs_chw = self._normalize_observation_array(obs_chw_raw)
 
         prev_x = th.as_tensor(prev_chw[None], dtype=th.float32, device=self.device)
         next_x = th.as_tensor(obs_chw[None], dtype=th.float32, device=self.device)
@@ -609,6 +713,9 @@ class PGLPLocalIntrinsicReward:
             error=current_error,
         )
 
+        self._update_obs_running_stats(prev_chw_raw)
+        self._update_obs_running_stats(obs_chw_raw)
+
         self._env_step_count += 1
         return float(raw)
 
@@ -620,6 +727,8 @@ class PGLPLocalIntrinsicReward:
     ) -> float:
         prev_obs = observations.detach().to(self.device).float()
         next_obs = next_observations.detach().to(self.device).float()
+        prev_obs = self._normalize_observation_tensor(prev_obs)
+        next_obs = self._normalize_observation_tensor(next_obs)
         act = actions.detach().to(self.device).view(-1).long()
 
         if prev_obs.ndim != 4 or next_obs.ndim != 4:

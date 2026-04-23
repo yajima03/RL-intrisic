@@ -1,7 +1,15 @@
 name: "pglp_local"
 
-initial_coef: 1.0
-final_coef: 0.1
+initial_coef: 0.05
+final_coef: 0.05
+
+normalize_observation: false
+observation_norm_clip: 5.0
+observation_norm_epsilon: 1.0e-8
+
+normalize_reward: false
+reward_norm_epsilon: 1.0e-8
+reward_norm_clip: null
 
 learning_rate: 1.0e-5
 embedding_dim: 64

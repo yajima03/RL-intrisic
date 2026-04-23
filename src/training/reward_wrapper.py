@@ -91,7 +91,11 @@ class RewardWrapper(gym.Wrapper):
                 info=info,
                 action=action,
             )
-        intrinsic_reward = coef * float(raw_intrinsic)
+        intrinsic_for_rl = float(raw_intrinsic)
+        if self.intrinsic_module is not None and hasattr(self.intrinsic_module, "normalize_raw_intrinsic_for_rl"):
+            intrinsic_for_rl = float(self.intrinsic_module.normalize_raw_intrinsic_for_rl(intrinsic_for_rl))
+
+        intrinsic_reward = coef * intrinsic_for_rl
         total_reward = float(ext_reward) + intrinsic_reward
 
         self.episode_external_return += float(ext_reward)

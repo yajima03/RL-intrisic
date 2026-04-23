@@ -179,7 +179,7 @@ class EnvStatusLoggingCallback(BaseCallback):
 
         base_env = self.train_env.unwrapped if hasattr(self.train_env, "unwrapped") else self.train_env
 
-        # 1) full env status snapshot
+
         if hasattr(base_env, "fprint_env_status"):
             try:
                 base_env.fprint_env_status(
@@ -191,7 +191,7 @@ class EnvStatusLoggingCallback(BaseCallback):
                 if self.verbose > 0:
                     print(f"[EnvStatusLoggingCallback] fprint_env_status failed at step {self.num_timesteps}: {e}")
 
-        # 2) raw intrinsic state-level history
+
         if self.intrinsic_module is not None and hasattr(self.intrinsic_module, "export_raw_intrinsic_per_state"):
             try:
                 raw_values = self.intrinsic_module.export_raw_intrinsic_per_state(base_env)
@@ -206,7 +206,6 @@ class EnvStatusLoggingCallback(BaseCallback):
                 if self.verbose > 0:
                     print(f"[EnvStatusLoggingCallback] raw intrinsic logging failed at step {self.num_timesteps}: {e}")
 
-        # 3) pglp step diagnostics
         if self.intrinsic_module is not None and hasattr(self.intrinsic_module, "flush_debug_stats"):
             try:
                 stats = self.intrinsic_module.flush_debug_stats()
@@ -225,7 +224,6 @@ def _deep_update(base: Dict[str, Any], updates: Mapping[str, Any]) -> Dict[str, 
         else:
             base[key] = deepcopy(value)
     return base
-
 
 
 def load_algo_config(config: Optional[str]) -> Dict[str, Any]:
@@ -533,6 +531,16 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
             initial_coef=initial_coef,
             final_coef=final_coef,
             coef_decay_steps=coef_decay_steps,
+            normalize_observation=bool(intrinsic_config.get("normalize_observation", False)),
+            observation_norm_clip=float(intrinsic_config.get("observation_norm_clip", 5.0)),
+            observation_norm_epsilon=float(intrinsic_config.get("observation_norm_epsilon", 1.0e-8)),
+            normalize_reward=bool(intrinsic_config.get("normalize_reward", False)),
+            reward_norm_epsilon=float(intrinsic_config.get("reward_norm_epsilon", 1.0e-8)),
+            reward_norm_clip=(
+                None
+                if intrinsic_config.get("reward_norm_clip", None) is None
+                else float(intrinsic_config.get("reward_norm_clip"))
+            ),
             device=str(intrinsic_config.get("device", "auto")),
             seed=(
                 None

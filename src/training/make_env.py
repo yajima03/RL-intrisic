@@ -9,7 +9,12 @@ import gymnasium as gym
 from gymnasium.wrappers import RecordEpisodeStatistics
 
 from src.envs.scalable_pyramid_env import ScalablePyramidEnv
-from src.envs.wrappers import HWCToCHWObservation
+from src.envs.wrappers import (
+    HWCToCHWObservation,
+    MiniGridThreeActionWrapper,
+    MiniGridDoorKeyFiveActionWrapper,
+    MiniGridImageFlatObsWrapper,
+)
 
 try:
     from stable_baselines3.common.monitor import Monitor
@@ -24,10 +29,11 @@ except Exception:  # pragma: no cover
     VecMonitor = None
 
 try:
-    from minigrid.wrappers import ImgObsWrapper, FullyObsWrapper
+    from minigrid.wrappers import ImgObsWrapper, FullyObsWrapper, FlatObsWrapper
 except Exception:  # pragma: no cover
     ImgObsWrapper = None
     FullyObsWrapper = None
+    FlatObsWrapper = None
 
 
 ConfigLike = Union[str, Path, Mapping[str, Any]]
@@ -110,10 +116,7 @@ def _normalize_seed(config: Dict[str, Any], seed: Optional[int]) -> Dict[str, An
     cfg["param"].setdefault("features", {})
 
     if seed is not None:
-        # general_seed may vary across train/eval/worker processes.
         cfg["param"]["general_seed"] = int(seed)
-        # Keep the feature-generation seed fixed from the config so that
-        # train and eval share the same SP task structure.
         cfg["param"]["features"].setdefault("seed", 1)
 
     return cfg
@@ -171,13 +174,41 @@ def _make_minigrid_env(cfg: Dict[str, Any], seed: Optional[int]):
 
     env_name = str(cfg["env_name"])
     render_mode = cfg.get("render_mode", None)
+    max_steps = cfg.get("max_steps", None)
 
     obs_cfg = dict(cfg.get("observation", {}))
     image_only = bool(obs_cfg.get("image_only", True))
     channel_first = bool(obs_cfg.get("channel_first", True))
     fully_observable = bool(obs_cfg.get("fully_observable", False))
+    flatten_obs = bool(obs_cfg.get("flatten_obs", False))
+    flatten_image_only = bool(obs_cfg.get("flatten_image_only", False))
+    flatten_image_scale_to_unit = bool(obs_cfg.get("flatten_image_scale_to_unit", True))
 
-    env = gym.make(env_name, render_mode=render_mode)
+    action_cfg = dict(cfg.get("action_wrapper", {}))
+    use_three_action = bool(action_cfg.get("three_action", False))
+    use_five_action_doorkey = bool(action_cfg.get("five_action_doorkey", False))
+
+    if use_three_action and use_five_action_doorkey:
+        raise ValueError(
+            "Only one MiniGrid action wrapper can be enabled at a time: "
+            "'three_action' or 'five_action_doorkey'."
+        )
+
+    enabled_obs_modes = sum(
+        int(v) for v in [image_only, flatten_obs, flatten_image_only]
+    )
+    if enabled_obs_modes > 1:
+        raise ValueError(
+            "MiniGrid observation config is invalid: "
+            "only one of 'image_only', 'flatten_obs', or 'flatten_image_only' "
+            "can be True."
+        )
+
+    make_kwargs = {"render_mode": render_mode}
+    if max_steps is not None:
+        make_kwargs["max_steps"] = int(max_steps)
+
+    env = gym.make(env_name, **make_kwargs)
 
     if fully_observable:
         if FullyObsWrapper is None:
@@ -189,7 +220,26 @@ def _make_minigrid_env(cfg: Dict[str, Any], seed: Optional[int]):
     if image_only:
         env = ImgObsWrapper(env)
 
-    if channel_first:
+    if flatten_obs:
+        if FlatObsWrapper is None:
+            raise ImportError(
+                "FlatObsWrapper is unavailable. Please check your minigrid installation."
+            )
+        env = FlatObsWrapper(env)
+        
+    if flatten_image_only:
+        env = MiniGridImageFlatObsWrapper(
+            env,
+            scale_to_unit=flatten_image_scale_to_unit,
+        )
+
+    if use_three_action:
+        env = MiniGridThreeActionWrapper(env)
+
+    if use_five_action_doorkey:
+        env = MiniGridDoorKeyFiveActionWrapper(env)
+
+    if image_only and channel_first:
         env = HWCToCHWObservation(env)
 
     effective_seed = seed

@@ -1,4 +1,4 @@
-env_name: "MiniGrid-FourRooms-v0"
+env_name: "MiniGrid-DoorKey-5x5-v0"
 env_family: "minigrid"
 
 render_mode: null
@@ -11,9 +11,10 @@ observation:
   flatten_obs: false
   flatten_image_only: true
   flatten_image_scale_to_unit: true
+  
 
 action_wrapper:
-  three_action: true
+  five_action_doorkey: true
 
 seeds:
   env_seed: 0

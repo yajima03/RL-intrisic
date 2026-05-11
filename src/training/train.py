@@ -358,14 +358,7 @@ class ConfigurableCNN(BaseFeaturesExtractor):
             in_dim = out_dim
         self.mlp = nn.Sequential(*mlp_blocks)
         self._features_dim = int(in_dim)
-        self._config_summary = {
-            "conv_layers": [dict(layer) for layer in conv_layers],
-            "global_pool": pool_key,
-            "post_pool_norm": norm_key,
-            "linear_layers": linear_layers,
-            "activation": activation_name,
-            "out_channels_last": out_channels_last,
-        }
+
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
         x = self.conv(observations)
@@ -442,26 +435,38 @@ def save_run_metadata(
 
 
 def build_policy_kwargs(algo_config: Dict[str, Any]) -> Dict[str, Any]:
+    policy_name = str(algo_config.get("policy", "CnnPolicy"))
     policy_cfg = dict(algo_config.get("policy_kwargs", {}))
-    extractor_cfg = dict(policy_cfg.get("features_extractor", {}))
-    extractor_name = extractor_cfg.pop("name", "ConfigurableCNN")
-    if extractor_name != "ConfigurableCNN":
-        raise ValueError(f"Unsupported features extractor: {extractor_name}")
 
-    q_net_hidden_layers = policy_cfg.get(
-        "q_net_hidden_layers",
-        algo_config.get("q_net_hidden_layers", [256]),
-    )
-    if isinstance(q_net_hidden_layers, int):
-        q_net_hidden_layers = [int(q_net_hidden_layers)]
-    q_net_hidden_layers = [int(v) for v in q_net_hidden_layers]
+    if policy_name == "CnnPolicy":
+        extractor_cfg = dict(policy_cfg.get("features_extractor", {}))
+        extractor_name = extractor_cfg.pop("name", "ConfigurableCNN")
+        if extractor_name != "ConfigurableCNN":
+            raise ValueError(f"Unsupported features extractor: {extractor_name}")
 
-    return {
-        "features_extractor_class": ConfigurableCNN,
-        "features_extractor_kwargs": extractor_cfg,
-        "net_arch": q_net_hidden_layers,
-        "normalize_images": bool(policy_cfg.get("normalize_images", False)),
-    }
+        q_net_hidden_layers = policy_cfg.get(
+            "q_net_hidden_layers",
+            algo_config.get("q_net_hidden_layers", [256]),
+        )
+        if isinstance(q_net_hidden_layers, int):
+            q_net_hidden_layers = [int(q_net_hidden_layers)]
+        q_net_hidden_layers = [int(v) for v in q_net_hidden_layers]
+
+        return {
+            "features_extractor_class": ConfigurableCNN,
+            "features_extractor_kwargs": extractor_cfg,
+            "net_arch": q_net_hidden_layers,
+            "normalize_images": bool(policy_cfg.get("normalize_images", False)),
+        }
+
+    if policy_name == "MlpPolicy":
+        net_arch = policy_cfg.get("net_arch", algo_config.get("q_net_hidden_layers", [128, 128]))
+        if isinstance(net_arch, int):
+            net_arch = [int(net_arch)]
+        net_arch = [int(v) for v in net_arch]
+        return {"net_arch": net_arch}
+
+    raise ValueError(f"Unsupported policy: {policy_name}")
 
 
 def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Optional[Dict[str, Any]] = None):
@@ -557,13 +562,14 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
 
 
 def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Path, intrinsic_module=None):
-    if str(algo_config.get("policy", "CnnPolicy")) != "CnnPolicy":
-        raise ValueError("This train.py currently supports only policy='CnnPolicy'.")
+    policy_name = str(algo_config.get("policy", "CnnPolicy"))
+    if policy_name not in {"CnnPolicy", "MlpPolicy"}:
+        raise ValueError("This train.py currently supports only policy='CnnPolicy' or 'MlpPolicy'.")
 
     policy_kwargs = build_policy_kwargs(algo_config)
 
     common_kwargs = dict(
-        policy="CnnPolicy",
+        policy=policy_name,
         env=train_env,
         learning_rate=float(algo_config.get("learning_rate", 1e-4)),
         buffer_size=int(algo_config.get("buffer_size", 100_000)),

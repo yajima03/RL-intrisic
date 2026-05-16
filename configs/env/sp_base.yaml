@@ -6,7 +6,7 @@ coeff_range: [-1.0, 1.0]
 obs_noise_std: 0.0
 
 param:
-  depth: 8
+  depth: 10
   hyperplane_dim: 2
   start_random: true
   general_seed: 42
@@ -15,9 +15,9 @@ param:
     seed: 1234
 
   rewards:
-    depth: [8]
+    depth: [10]
     coordinates:
-      - [1, 7]
+      - [1, 1]
     value: [1.0]
     type: ["fix"]
     var: [0.0]

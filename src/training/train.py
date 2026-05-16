@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from copy import deepcopy
 from datetime import datetime
@@ -18,6 +19,7 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from src.intrinsic.count_bonus import CountBasedBonus, CountBonusConfig
 from src.intrinsic.rnd import RNDConfig, RNDIntrinsicReward, RNDAugmentedDQN
+from src.intrinsic.pglp_local import PGLPLocalConfig, PGLPLocalIntrinsicReward, PGLPAugmentedDQN
 from src.training.make_env import load_env_config, make_env
 from src.training.reward_wrapper import RewardWrapper
 
@@ -61,7 +63,7 @@ DEFAULT_ALGO_CONFIG: Dict[str, Any] = {
     },
     "eval": {"eval_freq": 10_000, "n_eval_episodes": 10},
     "checkpoint": {"checkpoint_freq": 10_000},
-    "logging": {"log_interval": 10},
+    "logging": {"log_interval": 500},
 }
 
 DEFAULT_INTRINSIC_CONFIG: Dict[str, Any] = {
@@ -85,6 +87,7 @@ class ZeroIntrinsicReward:
     def compute(
         self,
         *,
+        previous_observation=None,
         observation=None,
         info=None,
         action=None,
@@ -93,11 +96,11 @@ class ZeroIntrinsicReward:
 
 
 class EnvStatusLoggingCallback(BaseCallback):
-    """Periodic callback for env-status CSV logging.
-
-    - Uses env.fprint_env_status() to dump full environment status every log_interval
-    - Uses env.fprint_env_rnd() to append one column of raw intrinsic reward per state
-      into a single CSV across the run
+    """
+    Periodic callback for:
+      1. env status csv snapshots via fprint_env_status
+      2. raw intrinsic state-level snapshots via fprint_env_rnd
+      3. pglp debug csv via flush_debug_stats()
     """
 
     def __init__(
@@ -114,7 +117,58 @@ class EnvStatusLoggingCallback(BaseCallback):
         self.run_log_dir = Path(run_log_dir)
         self.log_interval = int(log_interval)
         self.intrinsic_module = intrinsic_module
+
         self.raw_intrinsic_logname = "raw_intrinsic_history.csv"
+        self.pglp_debug_csv_path = self.run_log_dir / "pglp_debug.csv"
+        self._ensure_pglp_debug_header()
+
+    def _ensure_pglp_debug_header(self) -> None:
+        if self.pglp_debug_csv_path.exists():
+            return
+
+        self.pglp_debug_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.pglp_debug_csv_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "timestep",
+                    "mean_gate",
+                    "mean_progress",
+                    "mean_raw_intrinsic",
+                    "mean_current_error",
+                    "mean_current_coef",
+                    "mean_neighbor_count",
+                    "mean_prototype_count_for_action",
+                    "mean_prototype_long",
+                    "mean_prototype_short",
+                    "mean_prototype_index",
+                    "mean_signed_gap",
+                    "mean_positive_gap",
+                    "num_samples",
+                ]
+            )
+
+    def _append_pglp_debug_row(self, timestep: int, stats: Dict[str, float]) -> None:
+        with self.pglp_debug_csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    timestep,
+                    stats.get("mean_gate", 0.0),
+                    stats.get("mean_progress", 0.0),
+                    stats.get("mean_raw_intrinsic", 0.0),
+                    stats.get("mean_current_error", 0.0),
+                    stats.get("mean_current_coef", 0.0),
+                    stats.get("mean_neighbor_count", 0.0),
+                    stats.get("mean_prototype_count_for_action", 0.0),
+                    stats.get("mean_prototype_long", 0.0),
+                    stats.get("mean_prototype_short", 0.0),
+                    stats.get("mean_prototype_index", -1.0),
+                    stats.get("mean_signed_gap", 0.0),
+                    stats.get("mean_positive_gap", 0.0),
+                    stats.get("num_samples", 0.0),
+                ]
+            )
 
     def _on_step(self) -> bool:
         if self.log_interval <= 0:
@@ -125,7 +179,7 @@ class EnvStatusLoggingCallback(BaseCallback):
 
         base_env = self.train_env.unwrapped if hasattr(self.train_env, "unwrapped") else self.train_env
 
-        # 1) Full env status snapshot -> one csv per logging point
+
         if hasattr(base_env, "fprint_env_status"):
             try:
                 base_env.fprint_env_status(
@@ -137,7 +191,7 @@ class EnvStatusLoggingCallback(BaseCallback):
                 if self.verbose > 0:
                     print(f"[EnvStatusLoggingCallback] fprint_env_status failed at step {self.num_timesteps}: {e}")
 
-        # 2) Raw intrinsic reward over all states -> one csv for the full run
+
         if self.intrinsic_module is not None and hasattr(self.intrinsic_module, "export_raw_intrinsic_per_state"):
             try:
                 raw_values = self.intrinsic_module.export_raw_intrinsic_per_state(base_env)
@@ -152,6 +206,14 @@ class EnvStatusLoggingCallback(BaseCallback):
                 if self.verbose > 0:
                     print(f"[EnvStatusLoggingCallback] raw intrinsic logging failed at step {self.num_timesteps}: {e}")
 
+        if self.intrinsic_module is not None and hasattr(self.intrinsic_module, "flush_debug_stats"):
+            try:
+                stats = self.intrinsic_module.flush_debug_stats()
+                self._append_pglp_debug_row(self.num_timesteps, stats)
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"[EnvStatusLoggingCallback] pglp_debug.csv logging failed at step {self.num_timesteps}: {e}")
+
         return True
 
 
@@ -162,7 +224,6 @@ def _deep_update(base: Dict[str, Any], updates: Mapping[str, Any]) -> Dict[str, 
         else:
             base[key] = deepcopy(value)
     return base
-
 
 
 def load_algo_config(config: Optional[str]) -> Dict[str, Any]:
@@ -297,14 +358,7 @@ class ConfigurableCNN(BaseFeaturesExtractor):
             in_dim = out_dim
         self.mlp = nn.Sequential(*mlp_blocks)
         self._features_dim = int(in_dim)
-        self._config_summary = {
-            "conv_layers": [dict(layer) for layer in conv_layers],
-            "global_pool": pool_key,
-            "post_pool_norm": norm_key,
-            "linear_layers": linear_layers,
-            "activation": activation_name,
-            "out_channels_last": out_channels_last,
-        }
+
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
         x = self.conv(observations)
@@ -381,30 +435,41 @@ def save_run_metadata(
 
 
 def build_policy_kwargs(algo_config: Dict[str, Any]) -> Dict[str, Any]:
+    policy_name = str(algo_config.get("policy", "CnnPolicy"))
     policy_cfg = dict(algo_config.get("policy_kwargs", {}))
-    extractor_cfg = dict(policy_cfg.get("features_extractor", {}))
-    extractor_name = extractor_cfg.pop("name", "ConfigurableCNN")
-    if extractor_name != "ConfigurableCNN":
-        raise ValueError(f"Unsupported features extractor: {extractor_name}")
 
-    q_net_hidden_layers = policy_cfg.get(
-        "q_net_hidden_layers",
-        algo_config.get("q_net_hidden_layers", [256]),
-    )
-    if isinstance(q_net_hidden_layers, int):
-        q_net_hidden_layers = [int(q_net_hidden_layers)]
-    q_net_hidden_layers = [int(v) for v in q_net_hidden_layers]
+    if policy_name == "CnnPolicy":
+        extractor_cfg = dict(policy_cfg.get("features_extractor", {}))
+        extractor_name = extractor_cfg.pop("name", "ConfigurableCNN")
+        if extractor_name != "ConfigurableCNN":
+            raise ValueError(f"Unsupported features extractor: {extractor_name}")
 
-    return {
-        "features_extractor_class": ConfigurableCNN,
-        "features_extractor_kwargs": extractor_cfg,
-        "net_arch": q_net_hidden_layers,
-        "normalize_images": bool(policy_cfg.get("normalize_images", False)),
-    }
+        q_net_hidden_layers = policy_cfg.get(
+            "q_net_hidden_layers",
+            algo_config.get("q_net_hidden_layers", [256]),
+        )
+        if isinstance(q_net_hidden_layers, int):
+            q_net_hidden_layers = [int(q_net_hidden_layers)]
+        q_net_hidden_layers = [int(v) for v in q_net_hidden_layers]
+
+        return {
+            "features_extractor_class": ConfigurableCNN,
+            "features_extractor_kwargs": extractor_cfg,
+            "net_arch": q_net_hidden_layers,
+            "normalize_images": bool(policy_cfg.get("normalize_images", False)),
+        }
+
+    if policy_name == "MlpPolicy":
+        net_arch = policy_cfg.get("net_arch", algo_config.get("q_net_hidden_layers", [128, 128]))
+        if isinstance(net_arch, int):
+            net_arch = [int(net_arch)]
+        net_arch = [int(v) for v in net_arch]
+        return {"net_arch": net_arch}
+
+    raise ValueError(f"Unsupported policy: {policy_name}")
 
 
-
-def build_intrinsic_module(intrinsic_config: Dict[str, Any]):
+def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Optional[Dict[str, Any]] = None):
     intrinsic_name = str(intrinsic_config.get("name", "none")).lower()
     coef = float(intrinsic_config.get("coef", 1.0))
 
@@ -440,19 +505,71 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any]):
         )
         return RNDIntrinsicReward(rnd_config), coef, intrinsic_config
 
+    if intrinsic_name in {"pglp_local", "pglp-local", "pglp"}:
+        initial_coef = float(intrinsic_config.get("initial_coef", intrinsic_config.get("coef", 1.0)))
+        final_coef = float(intrinsic_config.get("final_coef", initial_coef))
+        coef_decay_steps = int(
+            intrinsic_config.get(
+                "coef_decay_steps",
+                (algo_config or {}).get("total_timesteps", 1),
+            )
+        )
+
+        pglp_config = PGLPLocalConfig(
+            learning_rate=float(intrinsic_config.get("learning_rate", 1.0e-4)),
+            conv_layers=intrinsic_config.get("conv_layers", None),
+            activation=str(intrinsic_config.get("activation", "relu")),
+            embedding_dim=int(intrinsic_config.get("embedding_dim", 64)),
+            encoder_fc_layers=tuple(intrinsic_config.get("encoder_fc_layers", [256])),
+            predictor_fc_layers=tuple(intrinsic_config.get("predictor_fc_layers", [256, 256])),
+            candidate_size=int(intrinsic_config.get("candidate_size", 512)),
+            knn_k=int(intrinsic_config.get("knn_k", 16)),
+            min_candidates=int(intrinsic_config.get("min_candidates", 16)),
+            gate_lambda=float(intrinsic_config.get("gate_lambda", 1.0)),
+            cache_capacity_per_action=int(intrinsic_config.get("cache_capacity_per_action", 20000)),
+            key_encoder_tau=float(intrinsic_config.get("key_encoder_tau", 0.01)),
+            num_prototypes_per_action=int(intrinsic_config.get("num_prototypes_per_action", 8)),
+            prototype_center_tau=float(intrinsic_config.get("prototype_center_tau", 0.05)),
+            prototype_min_count=int(intrinsic_config.get("prototype_min_count", 4)),
+            progress_ema_alpha=float(intrinsic_config.get("progress_ema_alpha", 0.99)),
+            progress_short_ema_alpha=float(intrinsic_config.get("progress_short_ema_alpha", 0.9)),
+            initial_coef=initial_coef,
+            final_coef=final_coef,
+            coef_decay_steps=coef_decay_steps,
+            normalize_observation=bool(intrinsic_config.get("normalize_observation", False)),
+            observation_norm_clip=float(intrinsic_config.get("observation_norm_clip", 5.0)),
+            observation_norm_epsilon=float(intrinsic_config.get("observation_norm_epsilon", 1.0e-8)),
+            normalize_reward=bool(intrinsic_config.get("normalize_reward", False)),
+            reward_norm_epsilon=float(intrinsic_config.get("reward_norm_epsilon", 1.0e-8)),
+            reward_norm_clip=(
+                None
+                if intrinsic_config.get("reward_norm_clip", None) is None
+                else float(intrinsic_config.get("reward_norm_clip"))
+            ),
+            device=str(intrinsic_config.get("device", "auto")),
+            seed=(
+                None
+                if intrinsic_config.get("seed", None) is None
+                else int(intrinsic_config.get("seed"))
+            ),
+        )
+        # Dynamic coef is handled inside PGLP + RewardWrapper, so the outer wrapper coef should be neutral.
+        return PGLPLocalIntrinsicReward(pglp_config), 1.0, intrinsic_config
+
     raise ValueError(f"Unsupported intrinsic reward name: {intrinsic_name}")
 
 
 
 
 def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Path, intrinsic_module=None):
-    if str(algo_config.get("policy", "CnnPolicy")) != "CnnPolicy":
-        raise ValueError("This train.py currently supports only policy='CnnPolicy'.")
+    policy_name = str(algo_config.get("policy", "CnnPolicy"))
+    if policy_name not in {"CnnPolicy", "MlpPolicy"}:
+        raise ValueError("This train.py currently supports only policy='CnnPolicy' or 'MlpPolicy'.")
 
     policy_kwargs = build_policy_kwargs(algo_config)
 
     common_kwargs = dict(
-        policy="CnnPolicy",
+        policy=policy_name,
         env=train_env,
         learning_rate=float(algo_config.get("learning_rate", 1e-4)),
         buffer_size=int(algo_config.get("buffer_size", 100_000)),
@@ -476,6 +593,9 @@ def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Pat
 
     if isinstance(intrinsic_module, RNDIntrinsicReward):
         return RNDAugmentedDQN(rnd_module=intrinsic_module, **common_kwargs)
+
+    if isinstance(intrinsic_module, PGLPLocalIntrinsicReward):
+        return PGLPAugmentedDQN(pglp_module=intrinsic_module, **common_kwargs)
 
     return DQN(**common_kwargs)
 
@@ -550,8 +670,7 @@ def make_train_env(
         monitor=False,
     )
 
-    intrinsic_module, intrinsic_coef, intrinsic_cfg = build_intrinsic_module(intrinsic_config)
-
+    intrinsic_module, intrinsic_coef, intrinsic_cfg = build_intrinsic_module(intrinsic_config, algo_config)
     actual_intrinsic_module = intrinsic_module
 
     if intrinsic_module is not None:

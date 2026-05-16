@@ -1,0 +1,38 @@
+algo_name: "dqn"
+
+policy: "MlpPolicy"
+device: "auto"
+seed: 0
+progress_bar: true
+deterministic_eval: true
+
+total_timesteps: 300000
+buffer_size: 300000
+learning_starts: 5000
+train_freq: 4
+gradient_steps: 4
+batch_size: 128
+
+learning_rate: 1.0e-4
+tau: 1.0
+gamma: 0.99
+exploration_fraction: 0.5
+exploration_initial_eps: 1
+exploration_final_eps: 0.05
+target_update_interval: 200
+
+max_grad_norm: 5.0
+
+policy_kwargs:
+  net_arch: [128, 128]
+
+eval:
+  eval_freq: 5000
+  n_eval_episodes: 50
+
+checkpoint:
+  checkpoint_freq: 5000
+
+logging:
+  log_interval: 500
+  

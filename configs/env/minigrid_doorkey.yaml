@@ -1,0 +1,20 @@
+env_name: "MiniGrid-DoorKey-5x5-v0"
+env_family: "minigrid"
+
+render_mode: null
+max_steps: 200
+
+observation:
+  image_only: false
+  channel_first: false
+  fully_observable: false
+  flatten_obs: false
+  flatten_image_only: true
+  flatten_image_scale_to_unit: true
+  
+
+action_wrapper:
+  five_action_doorkey: true
+
+seeds:
+  env_seed: 0

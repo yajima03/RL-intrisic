@@ -5,9 +5,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Union
 
 import yaml
+import gymnasium as gym
 from gymnasium.wrappers import RecordEpisodeStatistics
 
 from src.envs.scalable_pyramid_env import ScalablePyramidEnv
+from src.envs.wrappers import (
+    HWCToCHWObservation,
+    MiniGridThreeActionWrapper,
+    MiniGridDoorKeyFiveActionWrapper,
+    MiniGridImageFlatObsWrapper,
+)
 
 try:
     from stable_baselines3.common.monitor import Monitor
@@ -20,6 +27,13 @@ except Exception:  # pragma: no cover
     DummyVecEnv = None
     SubprocVecEnv = None
     VecMonitor = None
+
+try:
+    from minigrid.wrappers import ImgObsWrapper, FullyObsWrapper, FlatObsWrapper
+except Exception:  # pragma: no cover
+    ImgObsWrapper = None
+    FullyObsWrapper = None
+    FlatObsWrapper = None
 
 
 ConfigLike = Union[str, Path, Mapping[str, Any]]
@@ -87,14 +101,22 @@ def load_env_config(config: Optional[ConfigLike] = None) -> Dict[str, Any]:
 
 def _normalize_seed(config: Dict[str, Any], seed: Optional[int]) -> Dict[str, Any]:
     cfg = deepcopy(config)
+    env_name = str(cfg.get("env_name", "ScalablePyramid-v0"))
+
+    if env_name.startswith("MiniGrid-"):
+        cfg.setdefault("seeds", {})
+        if seed is not None:
+            cfg["seeds"]["env_seed"] = int(seed)
+        else:
+            cfg["seeds"].setdefault("env_seed", 0)
+        return cfg
+
+    # Scalable Pyramid seed handling
     cfg.setdefault("param", {})
     cfg["param"].setdefault("features", {})
 
     if seed is not None:
-        # general_seed may vary across train/eval/worker processes.
         cfg["param"]["general_seed"] = int(seed)
-        # Keep the feature-generation seed fixed from the config so that
-        # train and eval share the same SP task structure.
         cfg["param"]["features"].setdefault("seed", 1)
 
     return cfg
@@ -103,11 +125,18 @@ def _normalize_seed(config: Dict[str, Any], seed: Optional[int]) -> Dict[str, An
 
 def _check_env_name(config: Mapping[str, Any]) -> None:
     env_name = str(config.get("env_name", "ScalablePyramid-v0"))
-    valid_names = {"ScalablePyramid-v0", "ScalablePyramidEnv", "sp"}
-    if env_name not in valid_names:
-        raise UnsupportedEnvError(
-            f"Unsupported env_name '{env_name}'. Supported: {sorted(valid_names)}"
-        )
+
+    sp_valid_names = {"ScalablePyramid-v0", "ScalablePyramidEnv", "sp"}
+    if env_name in sp_valid_names:
+        return
+
+    if env_name.startswith("MiniGrid-"):
+        return
+
+    raise UnsupportedEnvError(
+        f"Unsupported env_name '{env_name}'. "
+        f"Supported: {sorted(sp_valid_names)} and MiniGrid-*"
+    )
 
 
 
@@ -126,6 +155,103 @@ def assert_has_reward_nodes(env: ScalablePyramidEnv) -> None:
         )
 
 
+def _make_sp_env(cfg: Dict[str, Any], seed: Optional[int]):
+    env = ScalablePyramidEnv(**cfg)
+    assert_has_reward_nodes(env)
+
+    if seed is not None:
+        env.reset(seed=int(seed))
+
+    return env
+
+
+def _make_minigrid_env(cfg: Dict[str, Any], seed: Optional[int]):
+    if ImgObsWrapper is None:
+        raise ImportError(
+            "MiniGrid is not installed or minigrid.wrappers could not be imported. "
+            "Please install minigrid."
+        )
+
+    env_name = str(cfg["env_name"])
+    render_mode = cfg.get("render_mode", None)
+    max_steps = cfg.get("max_steps", None)
+
+    obs_cfg = dict(cfg.get("observation", {}))
+    image_only = bool(obs_cfg.get("image_only", True))
+    channel_first = bool(obs_cfg.get("channel_first", True))
+    fully_observable = bool(obs_cfg.get("fully_observable", False))
+    flatten_obs = bool(obs_cfg.get("flatten_obs", False))
+    flatten_image_only = bool(obs_cfg.get("flatten_image_only", False))
+    flatten_image_scale_to_unit = bool(obs_cfg.get("flatten_image_scale_to_unit", True))
+
+    action_cfg = dict(cfg.get("action_wrapper", {}))
+    use_three_action = bool(action_cfg.get("three_action", False))
+    use_five_action_doorkey = bool(action_cfg.get("five_action_doorkey", False))
+
+    if use_three_action and use_five_action_doorkey:
+        raise ValueError(
+            "Only one MiniGrid action wrapper can be enabled at a time: "
+            "'three_action' or 'five_action_doorkey'."
+        )
+
+    enabled_obs_modes = sum(
+        int(v) for v in [image_only, flatten_obs, flatten_image_only]
+    )
+    if enabled_obs_modes > 1:
+        raise ValueError(
+            "MiniGrid observation config is invalid: "
+            "only one of 'image_only', 'flatten_obs', or 'flatten_image_only' "
+            "can be True."
+        )
+
+    make_kwargs = {"render_mode": render_mode}
+    if max_steps is not None:
+        make_kwargs["max_steps"] = int(max_steps)
+
+    env = gym.make(env_name, **make_kwargs)
+
+    if fully_observable:
+        if FullyObsWrapper is None:
+            raise ImportError(
+                "FullyObsWrapper is unavailable. Please check your minigrid installation."
+            )
+        env = FullyObsWrapper(env)
+
+    if image_only:
+        env = ImgObsWrapper(env)
+
+    if flatten_obs:
+        if FlatObsWrapper is None:
+            raise ImportError(
+                "FlatObsWrapper is unavailable. Please check your minigrid installation."
+            )
+        env = FlatObsWrapper(env)
+        
+    if flatten_image_only:
+        env = MiniGridImageFlatObsWrapper(
+            env,
+            scale_to_unit=flatten_image_scale_to_unit,
+        )
+
+    if use_three_action:
+        env = MiniGridThreeActionWrapper(env)
+
+    if use_five_action_doorkey:
+        env = MiniGridDoorKeyFiveActionWrapper(env)
+
+    if image_only and channel_first:
+        env = HWCToCHWObservation(env)
+
+    effective_seed = seed
+    if effective_seed is None:
+        effective_seed = int(cfg.get("seeds", {}).get("env_seed", 0))
+
+    env.reset(seed=int(effective_seed))
+    if hasattr(env.action_space, "seed"):
+        env.action_space.seed(int(effective_seed))
+
+    return env
+
 
 def make_env(
     config: Optional[ConfigLike] = None,
@@ -135,15 +261,19 @@ def make_env(
     monitor: bool = False,
     monitor_dir: Optional[Union[str, Path]] = None,
     env_kwargs: Optional[Mapping[str, Any]] = None,
-) -> ScalablePyramidEnv:
+):
     cfg = load_env_config(config)
     cfg = _normalize_seed(cfg, seed)
     if env_kwargs:
         cfg = _deep_update(cfg, env_kwargs)
 
     _check_env_name(cfg)
-    env = ScalablePyramidEnv(**cfg)
-    assert_has_reward_nodes(env)
+    env_name = str(cfg.get("env_name", "ScalablePyramid-v0"))
+
+    if env_name.startswith("MiniGrid-"):
+        env = _make_minigrid_env(cfg, seed)
+    else:
+        env = _make_sp_env(cfg, seed)
 
     if record_episode_statistics:
         env = RecordEpisodeStatistics(env)
@@ -157,8 +287,7 @@ def make_env(
         monitor_path = str(monitor_dir) if monitor_dir is not None else None
         env = Monitor(env, filename=monitor_path)
 
-    if seed is not None:
-        env.reset(seed=int(seed))
+
 
     return env
 
@@ -173,8 +302,8 @@ def make_env_fn(
     monitor: bool = False,
     monitor_dir: Optional[Union[str, Path]] = None,
     env_kwargs: Optional[Mapping[str, Any]] = None,
-) -> Callable[[], ScalablePyramidEnv]:
-    def _thunk() -> ScalablePyramidEnv:
+) -> Callable[[], gym.Env]:
+    def _thunk():
         seed = int(base_seed) + int(rank)
         return make_env(
             config=config,

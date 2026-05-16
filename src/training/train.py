@@ -192,16 +192,19 @@ class EnvStatusLoggingCallback(BaseCallback):
                     print(f"[EnvStatusLoggingCallback] fprint_env_status failed at step {self.num_timesteps}: {e}")
 
 
-        if self.intrinsic_module is not None and hasattr(self.intrinsic_module, "export_raw_intrinsic_per_state"):
+        if (
+            self.intrinsic_module is not None
+            and hasattr(self.intrinsic_module, "export_raw_intrinsic_per_state")
+            and hasattr(base_env, "fprint_env_rnd")
+        ):
             try:
                 raw_values = self.intrinsic_module.export_raw_intrinsic_per_state(base_env)
-                if hasattr(base_env, "fprint_env_rnd"):
-                    base_env.fprint_env_rnd(
-                        logname=self.raw_intrinsic_logname,
-                        step=self.num_timesteps,
-                        all_intrinsic=raw_values,
-                        base_dir=str(self.run_log_dir),
-                    )
+                base_env.fprint_env_rnd(
+                    logname=self.raw_intrinsic_logname,
+                    step=self.num_timesteps,
+                    all_intrinsic=raw_values,
+                    base_dir=str(self.run_log_dir),
+                )
             except Exception as e:
                 if self.verbose > 0:
                     print(f"[EnvStatusLoggingCallback] raw intrinsic logging failed at step {self.num_timesteps}: {e}")

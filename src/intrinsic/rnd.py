@@ -73,11 +73,12 @@ def _resolve_device(device: str) -> th.device:
 @dataclass
 class RNDConfig:
     learning_rate: float = 1.0e-4
+    encoder_type: str = "auto"  # "auto", "mlp", "cnn"
     conv_layers: Optional[Sequence[Mapping[str, Any]]] = None
     activation: str = "relu"
     embedding_dim: int = 64
-    target_fc_layers: Sequence[int] = (256,)
-    predictor_fc_layers: Sequence[int] = (256, 256, 256)
+    target_hidden_layers: Sequence[int] = (256,)
+    predictor_hidden_layers: Sequence[int] = (256, 256, 256)
     normalize_reward: bool = True
     reward_gamma: float = 0.99
     reward_norm_eps: float = 1.0e-8
@@ -106,6 +107,7 @@ class _MLPHead(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
+        x = x.reshape(x.shape[0], -1)
         return self.net(x)
 
 
@@ -150,14 +152,14 @@ class _SharedConvBackbone(nn.Module):
         return x
 
 
-class _RNDModel(nn.Module):
+class _RNDConvModel(nn.Module):
     def __init__(
         self,
         in_channels: int,
         *,
         conv_layers: Sequence[Mapping[str, Any]],
         activation: str,
-        head_layers: Sequence[int],
+        hidden_layers: Sequence[int],
         embedding_dim: int,
     ) -> None:
         super().__init__()
@@ -168,7 +170,7 @@ class _RNDModel(nn.Module):
         )
         self.head = _MLPHead(
             input_dim=self.backbone.output_dim,
-            hidden_layers=head_layers,
+            hidden_layers=hidden_layers,
             embedding_dim=embedding_dim,
             activation=activation,
         )
@@ -183,6 +185,10 @@ class RNDIntrinsicReward:
     """
     RND intrinsic reward module.
 
+    Supports both:
+    - explicit MLP backend for flat observations [D]
+    - CNN backend for image observations [C,H,W]
+
     - compute(): returns current prediction error without updating the predictor
     - update_from_batch(): updates predictor using replay-buffer batch samples
     - reward normalization: divides raw prediction error by std of discounted intrinsic returns
@@ -192,9 +198,10 @@ class RNDIntrinsicReward:
         self.config = config
         self.device = _resolve_device(config.device)
 
-        self.target: Optional[_RNDModel] = None
-        self.predictor: Optional[_RNDModel] = None
+        self.target: Optional[nn.Module] = None
+        self.predictor: Optional[nn.Module] = None
         self.optimizer: Optional[th.optim.Optimizer] = None
+        self._encoder_type_resolved: Optional[str] = None
 
         self._discounted_intrinsic_return = 0.0
         self.return_rms = RunningMeanStd(epsilon=1.0e-4)
@@ -209,42 +216,81 @@ class RNDIntrinsicReward:
             {"out_channels": 64, "kernel_size": 3, "stride": 1, "padding": 1},
         ]
 
-    def _preprocess_single_observation(self, observation: np.ndarray) -> np.ndarray:
+    def _canonicalize_single_observation(self, observation: np.ndarray) -> np.ndarray:
         obs = np.asarray(observation, dtype=np.float32)
 
-        if obs.ndim == 2:
-            obs = obs[None, :, :]
-        elif obs.ndim != 3:
-            raise ValueError(f"RND expects observation with shape (C,H,W) or (H,W), got {obs.shape}")
+        if obs.ndim == 0:
+            raise ValueError(f"RND expects non-scalar observation, got shape {obs.shape}")
+
+        # If HWC image is accidentally passed, convert to CHW.
+        if obs.ndim == 3 and obs.shape[0] not in (1, 3, 4) and obs.shape[-1] in (1, 3, 4):
+            obs = np.transpose(obs, (2, 0, 1))
 
         return obs
 
-    def _ensure_networks(self, sample_obs_chw: np.ndarray) -> None:
+    def _resolve_encoder_type(self, sample_obs: np.ndarray) -> str:
+        key = str(self.config.encoder_type).lower()
+        if key in {"mlp", "cnn"}:
+            return key
+        if key in {"auto", "infer"}:
+            return "mlp" if sample_obs.ndim == 1 else "cnn"
+        raise ValueError(f"Unsupported RND encoder_type: {self.config.encoder_type}")
+
+    def _ensure_networks(self, sample_obs: np.ndarray) -> None:
         if self.target is not None:
             return
+
+        sample_obs = self._canonicalize_single_observation(sample_obs)
 
         if self.config.seed is not None:
             th.manual_seed(int(self.config.seed))
             np.random.seed(int(self.config.seed))
 
-        conv_layers = self.config.conv_layers or self._default_conv_layers()
-        in_channels = int(sample_obs_chw.shape[0])
+        encoder_type = self._resolve_encoder_type(sample_obs)
+        self._encoder_type_resolved = encoder_type
 
-        self.target = _RNDModel(
-            in_channels=in_channels,
-            conv_layers=conv_layers,
-            activation=self.config.activation,
-            head_layers=self.config.target_fc_layers,
-            embedding_dim=self.config.embedding_dim,
-        ).to(self.device)
+        if encoder_type == "mlp":
+            input_dim = int(np.prod(sample_obs.shape))
+            self.target = _MLPHead(
+                input_dim=input_dim,
+                hidden_layers=self.config.target_hidden_layers,
+                embedding_dim=self.config.embedding_dim,
+                activation=self.config.activation,
+            ).to(self.device)
 
-        self.predictor = _RNDModel(
-            in_channels=in_channels,
-            conv_layers=conv_layers,
-            activation=self.config.activation,
-            head_layers=self.config.predictor_fc_layers,
-            embedding_dim=self.config.embedding_dim,
-        ).to(self.device)
+            self.predictor = _MLPHead(
+                input_dim=input_dim,
+                hidden_layers=self.config.predictor_hidden_layers,
+                embedding_dim=self.config.embedding_dim,
+                activation=self.config.activation,
+            ).to(self.device)
+
+        else:
+            if sample_obs.ndim == 2:
+                sample_obs = sample_obs[None, :, :]
+            if sample_obs.ndim != 3:
+                raise ValueError(
+                    f"CNN RND expects observation with shape (C,H,W) or (H,W), got {sample_obs.shape}"
+                )
+
+            conv_layers = self.config.conv_layers or self._default_conv_layers()
+            in_channels = int(sample_obs.shape[0])
+
+            self.target = _RNDConvModel(
+                in_channels=in_channels,
+                conv_layers=conv_layers,
+                activation=self.config.activation,
+                hidden_layers=self.config.target_hidden_layers,
+                embedding_dim=self.config.embedding_dim,
+            ).to(self.device)
+
+            self.predictor = _RNDConvModel(
+                in_channels=in_channels,
+                conv_layers=conv_layers,
+                activation=self.config.activation,
+                hidden_layers=self.config.predictor_hidden_layers,
+                embedding_dim=self.config.embedding_dim,
+            ).to(self.device)
 
         for p in self.target.parameters():
             p.requires_grad_(False)
@@ -254,6 +300,54 @@ class RNDIntrinsicReward:
             self.predictor.parameters(),
             lr=float(self.config.learning_rate),
         )
+
+    def _prepare_single_input(self, observation: np.ndarray) -> th.Tensor:
+        obs = self._canonicalize_single_observation(observation)
+        self._ensure_networks(obs)
+        assert self._encoder_type_resolved is not None
+
+        if self._encoder_type_resolved == "mlp":
+            x = obs.reshape(1, -1)
+        else:
+            if obs.ndim == 2:
+                obs = obs[None, :, :]
+            x = obs[None, ...]
+        return th.as_tensor(x, dtype=th.float32, device=self.device)
+
+    def _prepare_batch_input(self, observations: th.Tensor | np.ndarray) -> th.Tensor:
+        if isinstance(observations, np.ndarray):
+            obs = th.as_tensor(observations, dtype=th.float32, device=self.device)
+        else:
+            obs = observations.detach().to(self.device).float()
+
+        if self.target is None:
+            sample_obs = obs[0].detach().cpu().numpy()
+            self._ensure_networks(sample_obs)
+        assert self._encoder_type_resolved is not None
+
+        if self._encoder_type_resolved == "mlp":
+            if obs.ndim == 1:
+                obs = obs.unsqueeze(0)
+            obs = obs.reshape(obs.shape[0], -1)
+            return obs
+
+        # CNN path
+        if obs.ndim == 3:
+            # [B,H,W] -> [B,1,H,W] or [H,W,C] (single obs batchless)
+            if obs.shape[-1] in (1, 3, 4) and obs.shape[0] not in (1, 3, 4):
+                obs = obs.permute(2, 0, 1).unsqueeze(0)
+            else:
+                obs = obs.unsqueeze(1)
+        elif obs.ndim == 4:
+            # [B,H,W,C] -> [B,C,H,W]
+            if obs.shape[1] not in (1, 3, 4) and obs.shape[-1] in (1, 3, 4):
+                obs = obs.permute(0, 3, 1, 2)
+        else:
+            raise ValueError(
+                f"CNN RND expects batched image observations with ndim 3 or 4, got {tuple(obs.shape)}"
+            )
+
+        return obs
 
     def _raw_prediction_error(self, x: th.Tensor) -> th.Tensor:
         assert self.target is not None
@@ -288,30 +382,21 @@ class RNDIntrinsicReward:
         if observation is None:
             return 0.0
 
-        obs_chw = self._preprocess_single_observation(observation)
-        self._ensure_networks(obs_chw)
-
-        x = th.as_tensor(obs_chw[None], dtype=th.float32, device=self.device)
+        x = self._prepare_single_input(observation)
         raw_reward = float(self._raw_prediction_error(x).detach().cpu().item())
         return self._normalize_reward(raw_reward)
 
     def update_from_batch(self, observations: th.Tensor) -> float:
-        # observations: [B, C, H, W] tensor from SB3 replay buffer
-        obs = observations.detach().to(self.device).float()
-        if obs.ndim != 4:
-            raise ValueError(f"RND update_from_batch expects [B,C,H,W], got {tuple(obs.shape)}")
-
-        sample_obs = obs[0].detach().cpu().numpy()
-        self._ensure_networks(sample_obs)
+        x = self._prepare_batch_input(observations)
         assert self.target is not None
         assert self.predictor is not None
         assert self.optimizer is not None
 
 
         with th.no_grad():
-            target_feat = self.target(obs)
+            target_feat = self.target(x)
 
-        pred_feat = self.predictor(obs)
+        pred_feat = self.predictor(x)
         loss = F.mse_loss(pred_feat, target_feat, reduction="mean")
 
         self.optimizer.zero_grad(set_to_none=True)
@@ -336,13 +421,9 @@ class RNDIntrinsicReward:
             if core is None or not hasattr(core, "node_images"):
                 raise RuntimeError("Could not export all observations for RND logging.")
             all_obs = np.asarray(core.node_images, dtype=np.float32)
-            all_obs = th.from_numpy(all_obs)
+            
 
-        x = all_obs.to(self.device).float()
-        if x.ndim == 3:
-            x = x.unsqueeze(1)
-        if x.ndim != 4:
-            raise ValueError(f"Expected all observations with shape [N,C,H,W], got {tuple(x.shape)}")
+        x = self._prepare_batch_input(all_obs)
 
         with th.no_grad():
             raw = self._raw_prediction_error(x)
@@ -380,7 +461,8 @@ class RNDAugmentedDQN(DQN):
 
             self.policy.optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            if float(self.max_grad_norm) > 0:
+                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.policy.optimizer.step()
 
             if self.rnd_module is not None:
@@ -391,9 +473,11 @@ class RNDAugmentedDQN(DQN):
 
         if self._n_updates % max(self.target_update_interval, 1) == 0:
             polyak_update(self.q_net.parameters(), self.q_net_target.parameters(), self.tau)
-            polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
+            if hasattr(self, "batch_norm_stats") and hasattr(self, "batch_norm_stats_target"):
+                polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/loss", float(np.mean(losses)))
+        if losses:
+            self.logger.record("train/loss", float(np.mean(losses)))
         if rnd_losses:
             self.logger.record("train/rnd_loss", float(np.mean(rnd_losses)))

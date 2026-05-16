@@ -7,26 +7,12 @@ reward_norm_eps: 1.0e-8
 intrinsic_clip: 5.0
 
 learning_rate: 1.0e-4
-encoder_type: "cnn"
+encoder_type: "mlp"
 activation: "relu"
 embedding_dim: 64
 
 device: "auto"
 seed: 0
-
-conv_layers:
-  - out_channels: 32
-    kernel_size: 5
-    stride: 2
-    padding: 2
-  - out_channels: 32
-    kernel_size: 3
-    stride: 2
-    padding: 2
-  - out_channels: 64
-    kernel_size: 3
-    stride: 1
-    padding: 1
 
 target_hidden_layers: [256]
 predictor_hidden_layers: [256, 256, 256]

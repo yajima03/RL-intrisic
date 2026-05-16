@@ -299,8 +299,7 @@ class ConfigurableCNN(BaseFeaturesExtractor):
         in_channels = int(observation_space.shape[0])
         activation_name = str(activation)
         conv_blocks = []
-        out_channels_last = in_channels
-
+        
         for layer_cfg in conv_layers:
             out_channels = int(layer_cfg["out_channels"])
             kernel_size = int(layer_cfg.get("kernel_size", 3))
@@ -319,7 +318,7 @@ class ConfigurableCNN(BaseFeaturesExtractor):
                 ]
             )
             in_channels = out_channels
-            out_channels_last = out_channels
+
         self.conv = nn.Sequential(*conv_blocks)
 
         pool_key = str(global_pool).lower()
@@ -485,12 +484,30 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
         return CountBasedBonus(config), coef, intrinsic_config
 
     if intrinsic_name in {"rnd", "random_network_distillation"}:
+        policy_name = str((algo_config or {}).get("policy", "CnnPolicy"))
+        default_encoder_type = "mlp" if policy_name == "MlpPolicy" else "cnn"
+
         rnd_config = RNDConfig(
             learning_rate=float(intrinsic_config.get("learning_rate", 1.0e-4)),
+            encoder_type=str(intrinsic_config.get("encoder_type", default_encoder_type)),
             embedding_dim=int(intrinsic_config.get("embedding_dim", 64)),
+            target_hidden_layers=tuple(
+                intrinsic_config.get(
+                    "target_hidden_layers",
+                    intrinsic_config.get("target_fc_layers", [256]),
+                )
+            ),
+            predictor_hidden_layers=tuple(
+                intrinsic_config.get(
+                    "predictor_hidden_layers",
+                    intrinsic_config.get("predictor_fc_layers", [256, 256, 256]),
+                )
+            ),
             conv_layers=intrinsic_config.get("conv_layers", None),
             activation=str(intrinsic_config.get("activation", "relu")),
             normalize_reward=bool(intrinsic_config.get("normalize_reward", False)),
+            reward_gamma=float(intrinsic_config.get("reward_gamma", 0.99)),
+            reward_norm_eps=float(intrinsic_config.get("reward_norm_eps", 1.0e-8)),
             intrinsic_clip=(
                 None
                 if intrinsic_config.get("intrinsic_clip", None) is None
@@ -553,7 +570,7 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
                 else int(intrinsic_config.get("seed"))
             ),
         )
-        # Dynamic coef is handled inside PGLP + RewardWrapper, so the outer wrapper coef should be neutral.
+        
         return PGLPLocalIntrinsicReward(pglp_config), 1.0, intrinsic_config
 
     raise ValueError(f"Unsupported intrinsic reward name: {intrinsic_name}")

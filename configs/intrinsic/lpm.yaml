@@ -1,7 +1,6 @@
 name: "lpm"
 
-# Diagnostic phase: train LPM, but do not add its reward to DQN.
-# Once the LPM losses/errors behave correctly, enable a small fixed coefficient.
+# Small fixed coefficient used after the zero-coefficient diagnostic phase.
 initial_coef: 0.01
 final_coef: 0.01
 coef_decay_fraction: 1.0
@@ -30,6 +29,11 @@ clamp_max: 0.1
 intrinsic_clip: null
 normalize_reward: false
 max_grad_norm: 0.5
+
+# CSV diagnostics under outputs/<run>/logs/.
+transition_log_interval: 1
+update_log_interval: 1
+probe_interval: 1000
 
 device: "auto"
 seed: 0

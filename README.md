@@ -87,8 +87,8 @@ uv sync
 ## 実行方法
 以下のように、環境・ベースアルゴリズム・内発的動機付け手法をそれぞれ指定して実行。
 ``` bash
-uv run python -m src.training.train \          
-  --env-config configs/env/sp_base.yaml \ 
+uv run python -m src.training.train \
+  --env-config configs/env/sp_base.yaml \
   --algo-config configs/algo/dqn.yaml \
   --intrinsic-config configs/intrinsic/rnd.yaml
 ```
@@ -110,6 +110,14 @@ uv run python -m src.training.train \
   --intrinsic-config configs/intrinsic/count.yaml
 ```
 
+- minigrid_doorkey
+``` bash
+uv run python -m src.training.train \
+  --env-config configs/env/minigrid_doorkey.yaml \
+  --algo-config configs/algo/dqn_mlp.yaml \
+  --intrinsic-config configs/intrinsic/rnd_mlp.yaml
+```
+
 
 ## ログと保存内容
 各 run は `outputs/<run_name>/` 以下に保存されます。
@@ -121,6 +129,17 @@ uv run python -m src.training.train \
 - `models/final_model.zip`
 - `checkpoints/`
 - `tensorboard/`
+
+LPM実験では `logs/` に次の診断CSVも保存されます。
+
+- `lpm_transition.csv`: 現在誤差、旧誤差予測、signed LP、正規化・係数適用後のRL報酬
+- `lpm_update.csv`: dynamics/error modelのloss、較正誤差、version、勾配・parameter norm
+- `lpm_probe.csv`: 固定SP edge上の現在・直前モデル誤差とoracle/estimated progress
+- `run_config.yaml`: seed、解決済み設定、git commit、ログ値の定義
+
+`predicted_previous_error` と `lpm_signed` はlog-MSE空間です。現実装がRL報酬に
+使用した値は `lpm_raw_used`、最終的にDQNへ渡した値は
+`intrinsic_reward_to_rl` として別々に記録されます。
 
 ### monitor CSV の列
 現在の実装では、train_monitor.csv と eval_monitor.csv の両方に、少なくとも以下の列が保存される。

@@ -485,6 +485,7 @@ class ScalablePyramidEnv(Env):
         info = {
             "depth": 1,
             "node_id": node_id,
+            "state_id": node_id,
             "coordinates": tuple(self.env.nodes[node_id].coordinates) if node_id >= 0 else None,
             "visit_count": int(self.env.nodes[node_id].visit_count) if node_id >= 0 else 0,
             "episode_step": 0,
@@ -508,9 +509,16 @@ class ScalablePyramidEnv(Env):
         self.current_node_idx = self.env.current_node_idx
         node_id = int(self.current_node_idx) if self.current_node_idx is not None else -1
         node = self.env.nodes[node_id] if node_id >= 0 else None
+        state_depth = (
+            int(self.env.nodes[current_idx].depth) + 1 if current_idx is not None else 0
+        )
         info = {
             "depth": int(node.depth) + 1 if node is not None else 0,
             "node_id": node_id,
+            "state_id": int(current_idx) if current_idx is not None else -1,
+            "state_depth": state_depth,
+            "next_state_id": node_id,
+            "edge_id": f"{current_idx}:{int(action)}:{node_id}",
             "coordinates": tuple(node.coordinates) if node is not None else None,
             "visit_count": int(node.visit_count) if node is not None else 0,
             "episode_step": int(node.depth) if node is not None else 0,

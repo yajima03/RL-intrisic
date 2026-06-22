@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import subprocess
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -441,6 +442,37 @@ def save_run_metadata(
     with (run_dirs["run_dir"] / "cli_args.json").open("w", encoding="utf-8") as fh:
         json.dump(vars(cli_args), fh, indent=2, ensure_ascii=False)
 
+    try:
+        git_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        git_commit = "unknown"
+    run_config = {
+        "run_started_at": datetime.now().astimezone().isoformat(),
+        "git_commit": git_commit,
+        "seed": int(algo_config.get("seed", 0)),
+        "environment": env_config,
+        "dqn": algo_config,
+        "lpm": intrinsic_config,
+        "logging": {
+            "transition_log_interval": intrinsic_config.get("transition_log_interval", 1),
+            "update_log_interval": intrinsic_config.get("update_log_interval", 1),
+            "probe_interval": intrinsic_config.get("probe_interval", 1_000),
+            "predicted_previous_error_space": "log_mse",
+            "lpm_signed_definition": "predicted_previous_log_mse-current_log_mse",
+            "lpm_raw_used_definition": "post-clamp mse-space reward used by the agent",
+            "error_target_version_semantics": (
+                "dynamics version attached to sampled error-queue targets"
+            ),
+        },
+    }
+    with (run_dirs["logs"] / "run_config.yaml").open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(run_config, fh, sort_keys=False, allow_unicode=True)
+
 
 
 def build_policy_kwargs(algo_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -606,6 +638,9 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
                 if intrinsic_config.get("max_grad_norm", 10.0) is None
                 else float(intrinsic_config.get("max_grad_norm", 10.0))
             ),
+            transition_log_interval=int(intrinsic_config.get("transition_log_interval", 1)),
+            update_log_interval=int(intrinsic_config.get("update_log_interval", 1)),
+            probe_interval=int(intrinsic_config.get("probe_interval", 1_000)),
             device=str(intrinsic_config.get("device", "auto")),
             seed=(None if intrinsic_config.get("seed") is None else int(intrinsic_config["seed"])),
         )
@@ -880,6 +915,12 @@ def main() -> None:
         intrinsic_config=intrinsic_config,
         monitor_path=train_monitor_path,
     )
+    if isinstance(intrinsic_module, LPMIntrinsicReward):
+        intrinsic_module.configure_logging(
+            run_dirs["logs"],
+            env=train_env,
+            seed=int(algo_config.get("seed", 0)),
+        )
     eval_env = make_eval_env(
         env_config=env_config,
         algo_config=algo_config,
@@ -926,6 +967,8 @@ def main() -> None:
     with (run_dirs["run_dir"] / "run_summary.json").open("w", encoding="utf-8") as f:
         json.dump(run_summary, f, indent=2, ensure_ascii=False)
 
+    if isinstance(intrinsic_module, LPMIntrinsicReward):
+        intrinsic_module.close_logging()
     train_env.close()
     eval_env.close()
 

@@ -473,7 +473,8 @@ class ImgSPGymEnv(Env):
         if seed is not None:
             self.seed(seed)
         obs = self.env.reset()
-        return obs.astype(np.float32), {"depth": 1}
+        state_id = int(self.env.current_node_idx) if self.env.current_node_idx is not None else -1
+        return obs.astype(np.float32), {"depth": 1, "state_id": state_id}
 
     def step(self, action: int):
         current_idx = getattr(self.env, "current_node_idx", None)
@@ -486,7 +487,18 @@ class ImgSPGymEnv(Env):
             except Exception:
                 pass
         obs, reward, done = self.env.step(int(action))
-        info = {"depth": self.env.nodes[self.env.current_node_idx].depth + 1 if self.env.current_node_idx is not None else 0}
+        next_idx = getattr(self.env, "current_node_idx", None)
+        next_state_id = int(next_idx) if next_idx is not None else -1
+        current_depth = (
+            int(self.env.nodes[current_idx].depth) + 1 if current_idx is not None else 0
+        )
+        info = {
+            "depth": current_depth,
+            "next_depth": self.env.nodes[next_idx].depth + 1 if next_idx is not None else 0,
+            "state_id": int(current_idx) if current_idx is not None else -1,
+            "next_state_id": next_state_id,
+            "edge_id": f"{current_idx}:{int(action)}:{next_state_id}",
+        }
         return obs.astype(np.float32), reward, done, False, info
 
     def render(self):

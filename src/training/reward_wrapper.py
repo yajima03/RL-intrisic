@@ -98,6 +98,17 @@ class RewardWrapper(gym.Wrapper):
         intrinsic_reward = coef * intrinsic_for_rl
         total_reward = float(ext_reward) + intrinsic_reward
 
+        if hasattr(self.intrinsic_module, "record_rl_transition"):
+            self.intrinsic_module.record_rl_transition(
+                extrinsic_reward=float(ext_reward),
+                intrinsic_reward_normalized=intrinsic_for_rl,
+                intrinsic_coef=coef,
+                intrinsic_reward_to_rl=intrinsic_reward,
+                total_reward_to_rl=total_reward,
+                terminated=bool(terminated),
+                truncated=bool(truncated),
+            )
+
         self.episode_external_return += float(ext_reward)
         self.episode_intrinsic_return += intrinsic_reward
         self.episode_total_return += total_reward

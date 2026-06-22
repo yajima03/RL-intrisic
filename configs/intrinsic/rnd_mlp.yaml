@@ -1,5 +1,8 @@
 name: "rnd"
-coef: 0.05
+
+initial_coef: 0.1
+final_coef: 0.01
+coef_decay_fraction: 1.0
 
 normalize_reward: true
 reward_gamma: 0.99

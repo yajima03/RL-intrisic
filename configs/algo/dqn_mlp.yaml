@@ -6,8 +6,8 @@ seed: 0
 progress_bar: true
 deterministic_eval: true
 
-total_timesteps: 300000
-buffer_size: 300000
+total_timesteps: 500000
+buffer_size: 500000
 learning_starts: 5000
 train_freq: 4
 gradient_steps: 4

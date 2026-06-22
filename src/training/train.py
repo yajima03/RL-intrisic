@@ -12,14 +12,15 @@ import torch as th
 import torch.nn as nn
 import yaml
 from gymnasium import spaces
-from stable_baselines3 import DQN
-from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EvalCallback
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 from src.intrinsic.count_bonus import CountBasedBonus, CountBonusConfig
-from src.intrinsic.rnd import RNDConfig, RNDIntrinsicReward, RNDAugmentedDQN
-from src.intrinsic.pglp_local import PGLPLocalConfig, PGLPLocalIntrinsicReward, PGLPAugmentedDQN
+from src.intrinsic.lpm import LPMConfig, LPMIntrinsicReward, get_lpm_augmented_dqn_class
+from src.intrinsic.pglp_local import (
+    PGLPLocalConfig,
+    PGLPLocalIntrinsicReward,
+    get_pglp_augmented_dqn_class,
+)
+from src.intrinsic.rnd import RNDConfig, RNDIntrinsicReward, get_rnd_augmented_dqn_class
 from src.training.make_env import load_env_config, make_env
 from src.training.reward_wrapper import RewardWrapper
 
@@ -95,7 +96,7 @@ class ZeroIntrinsicReward:
         return 0.0
 
 
-class EnvStatusLoggingCallback(BaseCallback):
+class EnvStatusLoggingCallback:
     """
     Periodic callback for:
       1. env status csv snapshots via fprint_env_status
@@ -112,7 +113,8 @@ class EnvStatusLoggingCallback(BaseCallback):
         intrinsic_module=None,
         verbose: int = 0,
     ):
-        super().__init__(verbose)
+        self.verbose = int(verbose)
+        self.num_timesteps = 0
         self.train_env = train_env
         self.run_log_dir = Path(run_log_dir)
         self.log_interval = int(log_interval)
@@ -279,7 +281,7 @@ def get_activation(name: str) -> nn.Module:
     return table[key]()
 
 
-class ConfigurableCNN(BaseFeaturesExtractor):
+class ConfigurableCNN(nn.Module):
     """Config-driven CNN extractor for channel-first grayscale observations."""
 
     def __init__(
@@ -297,7 +299,8 @@ class ConfigurableCNN(BaseFeaturesExtractor):
         if len(observation_space.shape) != 3:
             raise ValueError("ConfigurableCNN expects observations with shape (C, H, W).")
 
-        super().__init__(observation_space, features_dim=1)
+        super().__init__()
+        self.observation_space = observation_space
 
         in_channels = int(observation_space.shape[0])
         activation_name = str(activation)
@@ -360,6 +363,10 @@ class ConfigurableCNN(BaseFeaturesExtractor):
             in_dim = out_dim
         self.mlp = nn.Sequential(*mlp_blocks)
         self._features_dim = int(in_dim)
+
+    @property
+    def features_dim(self) -> int:
+        return self._features_dim
 
 
     def forward(self, observations: th.Tensor) -> th.Tensor:
@@ -489,6 +496,19 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
     if intrinsic_name in {"rnd", "random_network_distillation"}:
         policy_name = str((algo_config or {}).get("policy", "CnnPolicy"))
         default_encoder_type = "mlp" if policy_name == "MlpPolicy" else "cnn"
+        initial_coef = float(
+            intrinsic_config.get(
+                "initial_coef",
+                intrinsic_config.get("inital_coef", intrinsic_config.get("coef", 1.0)),
+            )
+        )
+        final_coef = float(intrinsic_config.get("final_coef", initial_coef))
+        total_timesteps = int((algo_config or {}).get("total_timesteps", 1))
+        if intrinsic_config.get("coef_decay_steps", None) is not None:
+            coef_decay_steps = int(intrinsic_config["coef_decay_steps"])
+        else:
+            coef_decay_fraction = float(intrinsic_config.get("coef_decay_fraction", 1.0))
+            coef_decay_steps = max(int(total_timesteps * coef_decay_fraction), 1)
 
         rnd_config = RNDConfig(
             learning_rate=float(intrinsic_config.get("learning_rate", 1.0e-4)),
@@ -516,6 +536,9 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
                 if intrinsic_config.get("intrinsic_clip", None) is None
                 else float(intrinsic_config.get("intrinsic_clip"))
             ),
+            initial_coef=initial_coef,
+            final_coef=final_coef,
+            coef_decay_steps=coef_decay_steps,
             device=str(intrinsic_config.get("device", "auto")),
             seed=(
                 None
@@ -523,7 +546,70 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
                 else int(intrinsic_config.get("seed"))
             ),
         )
-        return RNDIntrinsicReward(rnd_config), coef, intrinsic_config
+        return RNDIntrinsicReward(rnd_config), 1.0, intrinsic_config
+
+    if intrinsic_name in {"lpm", "learning_progress_monitoring"}:
+        policy_name = str((algo_config or {}).get("policy", "CnnPolicy"))
+        default_encoder_type = "mlp" if policy_name == "MlpPolicy" else "cnn"
+        initial_coef = float(
+            intrinsic_config.get("initial_coef", intrinsic_config.get("coef", 1.0))
+        )
+        final_coef = float(intrinsic_config.get("final_coef", initial_coef))
+        total_timesteps = int((algo_config or {}).get("total_timesteps", 1))
+        if intrinsic_config.get("coef_decay_steps") is not None:
+            coef_decay_steps = int(intrinsic_config["coef_decay_steps"])
+        else:
+            decay_fraction = float(intrinsic_config.get("coef_decay_fraction", 1.0))
+            coef_decay_steps = max(int(total_timesteps * decay_fraction), 1)
+        lpm_config = LPMConfig(
+            dynamics_learning_rate=float(intrinsic_config.get("dynamics_learning_rate", 1.0e-4)),
+            error_learning_rate=float(intrinsic_config.get("error_learning_rate", 1.0e-3)),
+            encoder_type=str(intrinsic_config.get("encoder_type", default_encoder_type)),
+            conv_layers=intrinsic_config.get("conv_layers"),
+            activation=str(intrinsic_config.get("activation", "relu")),
+            feature_dim=int(intrinsic_config.get("feature_dim", 64)),
+            dynamics_hidden_layers=tuple(
+                intrinsic_config.get("dynamics_hidden_layers", [256, 256])
+            ),
+            error_hidden_layers=tuple(intrinsic_config.get("error_hidden_layers", [256, 128])),
+            error_buffer_size=int(intrinsic_config.get("error_buffer_size", 10_000)),
+            error_batch_size=int(intrinsic_config.get("error_batch_size", 64)),
+            reward_warmup_size=int(intrinsic_config.get("reward_warmup_size", 64)),
+            dynamics_updates=int(intrinsic_config.get("dynamics_updates", 1)),
+            error_updates=int(intrinsic_config.get("error_updates", 1)),
+            error_update_interval=int(intrinsic_config.get("error_update_interval", 1)),
+            log_error_epsilon=float(intrinsic_config.get("log_error_epsilon", 1.0e-6)),
+            expected_error_scale=float(intrinsic_config.get("expected_error_scale", 1.0)),
+            clamp_min=(
+                None
+                if intrinsic_config.get("clamp_min") is None
+                else float(intrinsic_config["clamp_min"])
+            ),
+            clamp_max=(
+                None
+                if intrinsic_config.get("clamp_max") is None
+                else float(intrinsic_config["clamp_max"])
+            ),
+            intrinsic_clip=(
+                None
+                if intrinsic_config.get("intrinsic_clip") is None
+                else float(intrinsic_config["intrinsic_clip"])
+            ),
+            normalize_reward=bool(intrinsic_config.get("normalize_reward", False)),
+            reward_gamma=float(intrinsic_config.get("reward_gamma", 0.99)),
+            reward_norm_eps=float(intrinsic_config.get("reward_norm_eps", 1.0e-8)),
+            initial_coef=initial_coef,
+            final_coef=final_coef,
+            coef_decay_steps=coef_decay_steps,
+            max_grad_norm=(
+                None
+                if intrinsic_config.get("max_grad_norm", 10.0) is None
+                else float(intrinsic_config.get("max_grad_norm", 10.0))
+            ),
+            device=str(intrinsic_config.get("device", "auto")),
+            seed=(None if intrinsic_config.get("seed") is None else int(intrinsic_config["seed"])),
+        )
+        return LPMIntrinsicReward(lpm_config), 1.0, intrinsic_config
 
     if intrinsic_name in {"pglp_local", "pglp-local", "pglp"}:
         initial_coef = float(intrinsic_config.get("initial_coef", intrinsic_config.get("coef", 1.0)))
@@ -582,6 +668,8 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
 
 
 def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Path, intrinsic_module=None):
+    from stable_baselines3 import DQN
+
     policy_name = str(algo_config.get("policy", "CnnPolicy"))
     if policy_name not in {"CnnPolicy", "MlpPolicy"}:
         raise ValueError("This train.py currently supports only policy='CnnPolicy' or 'MlpPolicy'.")
@@ -612,10 +700,16 @@ def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Pat
     )
 
     if isinstance(intrinsic_module, RNDIntrinsicReward):
+        RNDAugmentedDQN = get_rnd_augmented_dqn_class()
         return RNDAugmentedDQN(rnd_module=intrinsic_module, **common_kwargs)
 
     if isinstance(intrinsic_module, PGLPLocalIntrinsicReward):
+        PGLPAugmentedDQN = get_pglp_augmented_dqn_class()
         return PGLPAugmentedDQN(pglp_module=intrinsic_module, **common_kwargs)
+
+    if isinstance(intrinsic_module, LPMIntrinsicReward):
+        LPMAugmentedDQN = get_lpm_augmented_dqn_class()
+        return LPMAugmentedDQN(lpm_module=intrinsic_module, **common_kwargs)
 
     return DQN(**common_kwargs)
 
@@ -627,7 +721,18 @@ def build_callbacks(
     eval_env,
     train_env,
     intrinsic_module=None,
-) -> Optional[CallbackList]:
+) -> Optional[Any]:
+    from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EvalCallback
+
+    class SB3EnvStatusLoggingCallback(EnvStatusLoggingCallback, BaseCallback):
+        def __init__(self, **kwargs):
+            verbose = int(kwargs.get("verbose", 0))
+            BaseCallback.__init__(self, verbose=verbose)
+            EnvStatusLoggingCallback.__init__(self, **kwargs)
+
+        def _on_step(self) -> bool:
+            return EnvStatusLoggingCallback._on_step(self)
+
     callbacks = []
 
     checkpoint_freq = int(algo_config.get("checkpoint", {}).get("checkpoint_freq", 0))
@@ -661,7 +766,7 @@ def build_callbacks(
     status_log_interval = int(algo_config.get("logging", {}).get("log_interval", 0))
     if status_log_interval > 0:
         callbacks.append(
-            EnvStatusLoggingCallback(
+            SB3EnvStatusLoggingCallback(
                 train_env=train_env,
                 run_log_dir=run_dirs["logs"],
                 log_interval=status_log_interval,
@@ -683,6 +788,8 @@ def make_train_env(
     intrinsic_config: Dict[str, Any],
     monitor_path: Path,
 ):
+    from stable_baselines3.common.monitor import Monitor
+
     env = make_env(
         config=env_config,
         seed=int(algo_config.get("seed", 0)),
@@ -720,6 +827,8 @@ def make_eval_env(
     algo_config: Dict[str, Any],
     monitor_path: Path,
 ):
+    from stable_baselines3.common.monitor import Monitor
+
     env = make_env(
         config=env_config,
         seed=int(algo_config.get("seed", 0)) + 10_000,

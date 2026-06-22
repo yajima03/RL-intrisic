@@ -1,12 +1,12 @@
 env_name: "ScalablePyramid-v0"
 
-image_size: 32
-sigma_range: [1.0, 3.0]
+image_size: 64
+sigma_range: [1.0, 5.0]
 coeff_range: [-1.0, 1.0]
 obs_noise_std: 0.0
 
 param:
-  depth: 10
+  depth: 12
   hyperplane_dim: 2
   start_random: true
   general_seed: 42
@@ -15,7 +15,7 @@ param:
     seed: 1234
 
   rewards:
-    depth: [10]
+    depth: [12]
     coordinates:
       - [1, 1]
     value: [1.0]

@@ -8,8 +8,6 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
-from stable_baselines3 import DQN
-from stable_baselines3.common.utils import polyak_update
 
 
 def _get_activation(name: str) -> nn.Module:
@@ -759,11 +757,14 @@ class PGLPLocalIntrinsicReward:
         loss.backward()
         self.optimizer.step()
 
-        polyak_update(
-            self.encoder_online.parameters(),
-            self.encoder_key.parameters(),
-            float(self.config.key_encoder_tau),
-        )
+        tau = float(self.config.key_encoder_tau)
+        with th.no_grad():
+            for online_param, key_param in zip(
+                self.encoder_online.parameters(),
+                self.encoder_key.parameters(),
+            ):
+                key_param.data.mul_(1.0 - tau)
+                key_param.data.add_(online_param.data, alpha=tau)
 
         return float(loss.detach().cpu().item())
 
@@ -832,54 +833,55 @@ class PGLPLocalIntrinsicReward:
         return np.asarray(outputs, dtype=np.float32)
 
 
-class PGLPAugmentedDQN(DQN):
-    """DQN that additionally updates a PGLP predictor from the same replay buffer batch."""
+def get_pglp_augmented_dqn_class():
+    from stable_baselines3 import DQN
 
-    def __init__(self, *args, pglp_module: Optional[PGLPLocalIntrinsicReward] = None, **kwargs) -> None:
-        self.pglp_module = pglp_module
-        super().__init__(*args, **kwargs)
+    class PGLPAugmentedDQN(DQN):
+        """DQN that additionally updates a PGLP predictor from the same replay buffer batch."""
 
-    def train(self, gradient_steps: int, batch_size: int = 100) -> None:
-        self.policy.set_training_mode(True)
-        self._update_learning_rate(self.policy.optimizer)
+        def __init__(self, *args, pglp_module: Optional[PGLPLocalIntrinsicReward] = None, **kwargs) -> None:
+            self.pglp_module = pglp_module
+            super().__init__(*args, **kwargs)
 
-        losses = []
-        pglp_losses = []
+        def train(self, gradient_steps: int, batch_size: int = 100) -> None:
+            self.policy.set_training_mode(True)
+            self._update_learning_rate(self.policy.optimizer)
 
-        for _ in range(gradient_steps):
-            replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
+            losses = []
+            pglp_losses = []
 
-            with th.no_grad():
-                next_q_values = self.q_net_target(replay_data.next_observations)
-                next_q_values, _ = next_q_values.max(dim=1)
-                next_q_values = next_q_values.reshape(-1, 1)
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+            for _ in range(gradient_steps):
+                replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
 
-            current_q_values = self.q_net(replay_data.observations)
-            current_q_values = th.gather(current_q_values, dim=1, index=replay_data.actions.long())
-            loss = F.smooth_l1_loss(current_q_values, target_q_values)
-            losses.append(float(loss.detach().cpu().item()))
+                with th.no_grad():
+                    next_q_values = self.q_net_target(replay_data.next_observations)
+                    next_q_values, _ = next_q_values.max(dim=1)
+                    next_q_values = next_q_values.reshape(-1, 1)
+                    target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
-            self.policy.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-            self.policy.optimizer.step()
+                current_q_values = self.q_net(replay_data.observations)
+                current_q_values = th.gather(current_q_values, dim=1, index=replay_data.actions.long())
+                loss = F.smooth_l1_loss(current_q_values, target_q_values)
+                losses.append(float(loss.detach().cpu().item()))
 
-            if self.pglp_module is not None:
-                pglp_loss = self.pglp_module.update_from_batch(
-                    replay_data.observations,
-                    replay_data.next_observations,
-                    replay_data.actions,
-                )
-                pglp_losses.append(float(pglp_loss))
+                self.policy.optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                self.policy.optimizer.step()
 
-        self._n_updates += gradient_steps
+                if self.pglp_module is not None:
+                    pglp_loss = self.pglp_module.update_from_batch(
+                        replay_data.observations,
+                        replay_data.next_observations,
+                        replay_data.actions,
+                    )
+                    pglp_losses.append(float(pglp_loss))
 
-        if self._n_updates % max(self.target_update_interval, 1) == 0:
-            polyak_update(self.q_net.parameters(), self.q_net_target.parameters(), self.tau)
-            polyak_update(self.batch_norm_stats, self.batch_norm_stats_target, 1.0)
+            self._n_updates += gradient_steps
 
-        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        self.logger.record("train/loss", float(np.mean(losses)))
-        if pglp_losses:
-            self.logger.record("train/pglp_pred_loss", float(np.mean(pglp_losses)))
+            self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+            self.logger.record("train/loss", float(np.mean(losses)))
+            if pglp_losses:
+                self.logger.record("train/pglp_pred_loss", float(np.mean(pglp_losses)))
+
+    return PGLPAugmentedDQN

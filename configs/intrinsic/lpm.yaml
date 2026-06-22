@@ -1,0 +1,49 @@
+name: "lpm"
+
+# Diagnostic phase: train LPM, but do not add its reward to DQN.
+# Once the LPM losses/errors behave correctly, enable a small fixed coefficient.
+initial_coef: 0.01
+final_coef: 0.01
+coef_decay_fraction: 1.0
+
+# LPM models: f_theta predicts o_(t+1); g_phi predicts the previous f_theta error.
+dynamics_learning_rate: 1.0e-4
+error_learning_rate: 1.0e-3
+encoder_type: "cnn"
+activation: "relu"
+feature_dim: 64
+dynamics_hidden_layers: [128]
+error_hidden_layers: [128, 64]
+
+error_buffer_size: 100
+error_batch_size: 32
+reward_warmup_size: 100
+dynamics_updates: 1
+error_updates: 1
+error_update_interval: 5
+expected_error_scale: 1.0
+log_error_epsilon: 1.0e-6
+
+# Released MiniWorld code applies min(0.5, reward), preserving negative values.
+clamp_min: null
+clamp_max: 0.1
+intrinsic_clip: null
+normalize_reward: false
+max_grad_norm: 0.5
+
+device: "auto"
+seed: 0
+
+conv_layers:
+  - out_channels: 32
+    kernel_size: 5
+    stride: 2
+    padding: 2
+  - out_channels: 32
+    kernel_size: 3
+    stride: 2
+    padding: 1
+  - out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1

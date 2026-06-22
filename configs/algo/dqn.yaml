@@ -1,4 +1,10 @@
+
 algo_name: "dqn"
+
+# LPM paper MiniWorld alignment (Appendix C.2 and released notebooks).
+# The paper uses A2C rather than DQN. Its 64-step rollout is mapped to one
+# replay-batch update every 64 environment steps. DQN-only epsilon and target
+# network parameters have no direct paper counterpart.
 
 policy: "CnnPolicy"
 device: "auto"
@@ -6,17 +12,17 @@ seed: 0
 progress_bar: true
 deterministic_eval: true
 
-total_timesteps: 50000
-buffer_size: 50000
-learning_starts: 1000
-train_freq: 4
-gradient_steps: 4
-batch_size: 32
+total_timesteps: 30000       # 10 runs/episodes x 50,000 exploration steps
+buffer_size: 10000           # DQN-only: retain up to one complete run
+learning_starts: 1000          # first update after one paper-style rollout
+train_freq: 4                # paper update frequency
+gradient_steps: 4             # one batch update per 64-step collection cycle
+batch_size: 32                # all transitions from the corresponding rollout
 
-learning_rate: 1.0e-4
+learning_rate: 1.0e-4         # MiniWorld policy learning rate
 tau: 1.0
 gamma: 1.0
-exploration_fraction: 0.1
+exploration_fraction: 0.75
 exploration_initial_eps: 1
 exploration_final_eps: 0.05
 target_update_interval: 200
@@ -26,6 +32,8 @@ max_grad_norm: 5.0
 policy_kwargs:
   normalize_images: false
   features_extractor:
+    # Appendix C.3 uses Atari kernels (8/4/3) on 84x84 inputs. SP uses 32x32,
+    # so the existing small-image-compatible kernels are retained.
     conv_layers:
       - out_channels: 32
         kernel_size: 5
@@ -46,10 +54,10 @@ policy_kwargs:
 
 eval:
   eval_freq: 500
-  n_eval_episodes: 10
+  n_eval_episodes: 100
 
 checkpoint:
-  checkpoint_freq: 5000
+  checkpoint_freq: 50000
 
 logging:
   log_interval: 500

@@ -1,8 +1,8 @@
-env_name: "MiniGrid-DoorKey-5x5-v0"
+env_name: "MiniGrid-DoorKey-8x8-v0"
 env_family: "minigrid"
 
 render_mode: null
-max_steps: 200
+max_steps: 500
 
 observation:
   image_only: false

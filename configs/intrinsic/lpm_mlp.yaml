@@ -1,0 +1,25 @@
+name: "lpm"
+initial_coef: 0.1
+final_coef: 0.01
+coef_decay_fraction: 1.0
+
+dynamics_learning_rate: 1.0e-4
+error_learning_rate: 1.0e-3
+encoder_type: "mlp"
+activation: "relu"
+feature_dim: 64
+dynamics_hidden_layers: [256, 256]
+error_hidden_layers: [256, 128]
+error_buffer_size: 10000
+error_batch_size: 64
+reward_warmup_size: 64
+dynamics_updates: 1
+error_updates: 1
+expected_error_scale: 1.0
+log_error_epsilon: 1.0e-6
+clamp_min: null
+intrinsic_clip: 5.0
+normalize_reward: false
+max_grad_norm: 10.0
+device: "auto"
+seed: 0

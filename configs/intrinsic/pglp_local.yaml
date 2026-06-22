@@ -11,7 +11,7 @@ normalize_reward: false
 reward_norm_epsilon: 1.0e-8
 reward_norm_clip: null
 
-learning_rate: 1.0e-5
+learning_rate: 1.0e-4
 embedding_dim: 64
 activation: "relu"
 device: "auto"
@@ -39,10 +39,4 @@ knn_k: 32
 min_candidates: 16
 cache_capacity_per_action: 2000
 key_encoder_tau: 0.01
-gate_lambda: 0.01
-
-num_prototypes_per_action: 8
-prototype_center_tau: 0.05
-prototype_min_count: 4
-progress_ema_alpha: 0.9995
-progress_short_ema_alpha: 0.5
+gate_lambda: 0.1

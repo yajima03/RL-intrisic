@@ -16,27 +16,37 @@ from src.envs.wrappers import (
     MiniGridImageFlatObsWrapper,
 )
 
-try:
-    from stable_baselines3.common.monitor import Monitor
-except Exception:  # pragma: no cover
-    Monitor = None
-
-try:
-    from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
-except Exception:  # pragma: no cover
-    DummyVecEnv = None
-    SubprocVecEnv = None
-    VecMonitor = None
-
-try:
-    from minigrid.wrappers import ImgObsWrapper, FullyObsWrapper, FlatObsWrapper
-except Exception:  # pragma: no cover
-    ImgObsWrapper = None
-    FullyObsWrapper = None
-    FlatObsWrapper = None
-
-
 ConfigLike = Union[str, Path, Mapping[str, Any]]
+
+
+def _load_monitor_class():
+    try:
+        from stable_baselines3.common.monitor import Monitor
+    except Exception as exc:  # pragma: no cover
+        raise ImportError(
+            "stable-baselines3 is required to use monitor=True. "
+            "Install stable-baselines3 or disable the monitor wrapper."
+        ) from exc
+    return Monitor
+
+
+def _load_vec_env_classes():
+    try:
+        from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor
+    except Exception as exc:  # pragma: no cover
+        raise ImportError("stable-baselines3 is required to create vectorized environments.") from exc
+    return DummyVecEnv, SubprocVecEnv, VecMonitor
+
+
+def _load_minigrid_wrappers():
+    try:
+        from minigrid.wrappers import ImgObsWrapper, FullyObsWrapper, FlatObsWrapper
+    except Exception as exc:  # pragma: no cover
+        raise ImportError(
+            "MiniGrid is not installed or minigrid.wrappers could not be imported. "
+            "Please install minigrid."
+        ) from exc
+    return ImgObsWrapper, FullyObsWrapper, FlatObsWrapper
 
 
 DEFAULT_ENV_CONFIG: Dict[str, Any] = {
@@ -166,11 +176,7 @@ def _make_sp_env(cfg: Dict[str, Any], seed: Optional[int]):
 
 
 def _make_minigrid_env(cfg: Dict[str, Any], seed: Optional[int]):
-    if ImgObsWrapper is None:
-        raise ImportError(
-            "MiniGrid is not installed or minigrid.wrappers could not be imported. "
-            "Please install minigrid."
-        )
+    ImgObsWrapper, FullyObsWrapper, FlatObsWrapper = _load_minigrid_wrappers()
 
     env_name = str(cfg["env_name"])
     render_mode = cfg.get("render_mode", None)
@@ -211,20 +217,12 @@ def _make_minigrid_env(cfg: Dict[str, Any], seed: Optional[int]):
     env = gym.make(env_name, **make_kwargs)
 
     if fully_observable:
-        if FullyObsWrapper is None:
-            raise ImportError(
-                "FullyObsWrapper is unavailable. Please check your minigrid installation."
-            )
         env = FullyObsWrapper(env)
 
     if image_only:
         env = ImgObsWrapper(env)
 
     if flatten_obs:
-        if FlatObsWrapper is None:
-            raise ImportError(
-                "FlatObsWrapper is unavailable. Please check your minigrid installation."
-            )
         env = FlatObsWrapper(env)
         
     if flatten_image_only:
@@ -279,11 +277,7 @@ def make_env(
         env = RecordEpisodeStatistics(env)
 
     if monitor:
-        if Monitor is None:
-            raise ImportError(
-                "stable-baselines3 is required to use monitor=True. "
-                "Install stable-baselines3 or disable the monitor wrapper."
-            )
+        Monitor = _load_monitor_class()
         monitor_path = str(monitor_dir) if monitor_dir is not None else None
         env = Monitor(env, filename=monitor_path)
 
@@ -329,8 +323,7 @@ def make_vec_env(
     monitor_dir: Optional[Union[str, Path]] = None,
     env_kwargs: Optional[Mapping[str, Any]] = None,
 ):
-    if DummyVecEnv is None:
-        raise ImportError("stable-baselines3 is required to create vectorized environments.")
+    DummyVecEnv, SubprocVecEnv, VecMonitor = _load_vec_env_classes()
 
     env_fns = [
         make_env_fn(
@@ -348,19 +341,11 @@ def make_vec_env(
     if vec_env_type == "dummy":
         vec_env = DummyVecEnv(env_fns)
     elif vec_env_type == "subproc":
-        if SubprocVecEnv is None:
-            raise ImportError(
-                "stable-baselines3 does not provide SubprocVecEnv in this environment."
-            )
         vec_env = SubprocVecEnv(env_fns)
     else:
         raise ValueError("vec_env_type must be either 'dummy' or 'subproc'.")
 
     if monitor:
-        if VecMonitor is None:
-            raise ImportError(
-                "stable-baselines3 is required to wrap vectorized envs with VecMonitor."
-            )
         vec_env = VecMonitor(vec_env, filename=str(monitor_dir) if monitor_dir else None)
 
     return vec_env

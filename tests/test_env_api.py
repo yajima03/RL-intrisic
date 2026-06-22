@@ -9,10 +9,12 @@ import yaml
 from src.training.make_env import DEFAULT_ENV_CONFIG, load_env_config, make_env
 from src.envs.scalable_pyramid_env import ScalablePyramidEnv
 
-try:
-    from stable_baselines3.common.env_checker import check_env
-except Exception:  # pragma: no cover
-    check_env = None
+def _load_check_env():
+    try:
+        from stable_baselines3.common.env_checker import check_env
+    except Exception:  # pragma: no cover
+        return None
+    return check_env
 
 
 @pytest.fixture
@@ -160,8 +162,11 @@ def test_state_action_count_increments(env: ScalablePyramidEnv) -> None:
     assert after == before + 1
 
 
-@pytest.mark.skipif(check_env is None, reason="stable-baselines3 is not installed")
 def test_check_env_passes(env_config: dict) -> None:
+    check_env = _load_check_env()
+    if check_env is None:
+        pytest.skip("stable-baselines3 is not installed")
+
     environment = make_env(env_config, seed=0, record_episode_statistics=False)
     try:
         check_env(environment, warn=True, skip_render_check=True)

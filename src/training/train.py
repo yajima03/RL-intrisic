@@ -749,6 +749,91 @@ def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Pat
     return DQN(**common_kwargs)
 
 
+def init_wandb_run(
+    *,
+    algo_config: Dict[str, Any],
+    env_config: Dict[str, Any],
+    intrinsic_config: Dict[str, Any],
+    run_dirs: Dict[str, Path],
+):
+    wandb_config = dict(algo_config.get("wandb", {}))
+    if not bool(wandb_config.get("enabled", False)):
+        return None
+
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "W&B tracking is enabled but wandb is not installed. Run `uv sync` first."
+        ) from exc
+
+    mode = str(wandb_config.get("mode", "online")).lower()
+    if mode not in {"online", "offline", "disabled"}:
+        raise ValueError("wandb.mode must be one of: online, offline, disabled")
+    seed = int(algo_config.get("seed", 0))
+    run_name = run_dirs["run_dir"].name
+    configured_name = wandb_config.get("name")
+    if configured_name:
+        resolved_name = str(configured_name).format(seed=seed, run_name=run_name)
+    else:
+        resolved_name = f"{run_name}-seed-{seed}"
+
+    settings = wandb.Settings(
+        init_timeout=float(wandb_config.get("init_timeout", 30)),
+    )
+    init_kwargs: Dict[str, Any] = {
+        "project": str(wandb_config.get("project", "RL-intrinsic")),
+        "group": wandb_config.get("group"),
+        "name": resolved_name,
+        "mode": mode,
+        "dir": str(run_dirs["run_dir"]),
+        "config": {
+            "seed": seed,
+            "environment": env_config,
+            "algorithm": {key: value for key, value in algo_config.items() if key != "wandb"},
+            "intrinsic": intrinsic_config,
+        },
+        "sync_tensorboard": bool(wandb_config.get("sync_tensorboard", True)),
+        "save_code": bool(wandb_config.get("save_code", True)),
+        "settings": settings,
+    }
+    for key in ("entity", "tags", "notes", "job_type"):
+        value = wandb_config.get(key)
+        if value is not None:
+            init_kwargs[key] = value
+    return wandb.init(**init_kwargs)
+
+
+def upload_wandb_logs(wandb_run: Any, run_dirs: Dict[str, Path], algo_config: Dict[str, Any]) -> None:
+    if wandb_run is None:
+        return
+    wandb_config = dict(algo_config.get("wandb", {}))
+    if not bool(wandb_config.get("upload_logs", True)):
+        return
+    try:
+        import wandb
+
+        artifact = wandb.Artifact(
+            name=f"{wandb_run.id}-logs",
+            type="training-logs",
+            description="Monitor, LPM transition/update/probe, and resolved run configuration logs.",
+        )
+        artifact.add_dir(str(run_dirs["logs"]))
+        for filename in (
+            "env_config_resolved.yaml",
+            "algo_config_resolved.yaml",
+            "intrinsic_config_resolved.yaml",
+            "cli_args.json",
+            "run_summary.json",
+        ):
+            path = run_dirs["run_dir"] / filename
+            if path.exists():
+                artifact.add_file(str(path))
+        wandb_run.log_artifact(artifact)
+    except Exception as exc:
+        print(f"[wandb] log artifact upload failed: {exc}")
+
+
 def build_callbacks(
     *,
     algo_config: Dict[str, Any],
@@ -756,6 +841,7 @@ def build_callbacks(
     eval_env,
     train_env,
     intrinsic_module=None,
+    wandb_run=None,
 ) -> Optional[Any]:
     from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EvalCallback
 
@@ -769,6 +855,23 @@ def build_callbacks(
             return EnvStatusLoggingCallback._on_step(self)
 
     callbacks = []
+
+    if wandb_run is not None:
+        from wandb.integration.sb3 import WandbCallback
+
+        wandb_config = dict(algo_config.get("wandb", {}))
+        model_save_freq = int(wandb_config.get("model_save_freq", 0))
+        wandb_model_dir = run_dirs["models"] / "wandb"
+        if model_save_freq > 0:
+            wandb_model_dir.mkdir(parents=True, exist_ok=True)
+        callbacks.append(
+            WandbCallback(
+                gradient_save_freq=int(wandb_config.get("gradient_save_freq", 0)),
+                model_save_path=str(wandb_model_dir) if model_save_freq > 0 else None,
+                model_save_freq=model_save_freq,
+                verbose=1,
+            )
+        )
 
     checkpoint_freq = int(algo_config.get("checkpoint", {}).get("checkpoint_freq", 0))
     if checkpoint_freq > 0:
@@ -927,56 +1030,74 @@ def main() -> None:
         monitor_path=eval_monitor_path,
     )
 
-    model = build_dqn_model(
-        train_env=train_env,
-        algo_config=algo_config,
-        tensorboard_log=run_dirs["tensorboard"],
-        intrinsic_module=intrinsic_module,
-    )
-    callbacks = build_callbacks(
-        algo_config=algo_config,
-        run_dirs=run_dirs,
-        eval_env=eval_env,
-        train_env=train_env,
-        intrinsic_module=intrinsic_module,
-    )
-
-    model.learn(
-        total_timesteps=int(algo_config.get("total_timesteps", 100_000)),
-        callback=callbacks,
-        log_interval=int(algo_config.get("logging", {}).get("log_interval", 10)),
-        progress_bar=bool(algo_config.get("progress_bar", True)),
-        tb_log_name="dqn_sp",
-    )
-
+    wandb_run = None
     final_model_path = run_dirs["models"] / "final_model"
-    model.save(str(final_model_path))
-    model.save_replay_buffer(str(run_dirs["models"] / "final_replay_buffer.pkl"))
+    try:
+        wandb_run = init_wandb_run(
+            algo_config=algo_config,
+            env_config=env_config,
+            intrinsic_config=intrinsic_config,
+            run_dirs=run_dirs,
+        )
+        model = build_dqn_model(
+            train_env=train_env,
+            algo_config=algo_config,
+            tensorboard_log=run_dirs["tensorboard"],
+            intrinsic_module=intrinsic_module,
+        )
+        callbacks = build_callbacks(
+            algo_config=algo_config,
+            run_dirs=run_dirs,
+            eval_env=eval_env,
+            train_env=train_env,
+            intrinsic_module=intrinsic_module,
+            wandb_run=wandb_run,
+        )
 
-    run_summary = {
-        "final_model_path": str(final_model_path) + ".zip",
-        "tensorboard_dir": str(run_dirs["tensorboard"]),
-        "checkpoints_dir": str(run_dirs["checkpoints"]),
-        "seed": int(algo_config.get("seed", 0)),
-        "total_timesteps": int(algo_config.get("total_timesteps", 100_000)),
-        "algo_name": algo_config.get("algo_name", "unknown"),
-        "intrinsic_name": intrinsic_config.get("name", "none"),
-        "intrinsic": intrinsic_cfg,
-    }
+        model.learn(
+            total_timesteps=int(algo_config.get("total_timesteps", 100_000)),
+            callback=callbacks,
+            log_interval=int(algo_config.get("logging", {}).get("log_interval", 10)),
+            progress_bar=bool(algo_config.get("progress_bar", True)),
+            tb_log_name="dqn_sp",
+        )
 
-    with (run_dirs["run_dir"] / "run_summary.json").open("w", encoding="utf-8") as f:
-        json.dump(run_summary, f, indent=2, ensure_ascii=False)
+        model.save(str(final_model_path))
+        model.save_replay_buffer(str(run_dirs["models"] / "final_replay_buffer.pkl"))
 
-    if isinstance(intrinsic_module, LPMIntrinsicReward):
-        intrinsic_module.close_logging()
-    train_env.close()
-    eval_env.close()
+        run_summary = {
+            "final_model_path": str(final_model_path) + ".zip",
+            "tensorboard_dir": str(run_dirs["tensorboard"]),
+            "checkpoints_dir": str(run_dirs["checkpoints"]),
+            "wandb_run_id": getattr(wandb_run, "id", None),
+            "wandb_run_url": getattr(wandb_run, "url", None),
+            "seed": int(algo_config.get("seed", 0)),
+            "total_timesteps": int(algo_config.get("total_timesteps", 100_000)),
+            "algo_name": algo_config.get("algo_name", "unknown"),
+            "intrinsic_name": intrinsic_config.get("name", "none"),
+            "intrinsic": intrinsic_cfg,
+        }
+
+        with (run_dirs["run_dir"] / "run_summary.json").open("w", encoding="utf-8") as f:
+            json.dump(run_summary, f, indent=2, ensure_ascii=False)
+        if isinstance(intrinsic_module, LPMIntrinsicReward):
+            intrinsic_module.close_logging()
+        upload_wandb_logs(wandb_run, run_dirs, algo_config)
+    finally:
+        if isinstance(intrinsic_module, LPMIntrinsicReward):
+            intrinsic_module.close_logging()
+        train_env.close()
+        eval_env.close()
+        if wandb_run is not None:
+            wandb_run.finish()
 
     print("Training finished.")
     print(f"Run directory      : {run_dirs['run_dir']}")
     print(f"Final model        : {final_model_path}.zip")
     print(f"TensorBoard logs   : {run_dirs['tensorboard']}")
     print(f"Checkpoint dir     : {run_dirs['checkpoints']}")
+    if wandb_run is not None:
+        print(f"W&B run            : {wandb_run.id}")
 
 
 if __name__ == "__main__":

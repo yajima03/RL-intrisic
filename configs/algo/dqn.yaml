@@ -26,9 +26,9 @@ seed: 0
 progress_bar: true
 deterministic_eval: true
 
-total_timesteps: 30000       # 10 runs/episodes x 50,000 exploration steps
+total_timesteps: 100000       # 10 runs/episodes x 50,000 exploration steps
 buffer_size: 10000           # DQN-only: retain up to one complete run
-learning_starts: 1000          # first update after one paper-style rollout
+learning_starts: 5000          # first update after one paper-style rollout
 train_freq: 4                # paper update frequency
 gradient_steps: 4             # one batch update per 64-step collection cycle
 batch_size: 32                # all transitions from the corresponding rollout
@@ -71,7 +71,7 @@ eval:
   n_eval_episodes: 100
 
 checkpoint:
-  checkpoint_freq: 50000
+  checkpoint_freq: 0
 
 logging:
   log_interval: 500

@@ -33,10 +33,13 @@ class RewardWrapper(gym.Wrapper):
         *,
         intrinsic_module: IntrinsicRewardModule,
         intrinsic_coef: float = 1.0,
+        store_transitions: bool = False,
     ) -> None:
         super().__init__(env)
         self.intrinsic_module = intrinsic_module
         self.intrinsic_coef = float(intrinsic_coef)
+        self.store_transitions = bool(store_transitions)
+        self._transition_buffer: list[tuple[np.ndarray, np.ndarray, Any]] = []
 
         self.episode_external_return = 0.0
         self.episode_intrinsic_return = 0.0
@@ -64,6 +67,11 @@ class RewardWrapper(gym.Wrapper):
         self.intrinsic_module.reset_episode()
         return obs, info
 
+    def pop_transition_batch(self):
+        transitions = self._transition_buffer
+        self._transition_buffer = []
+        return transitions
+
     def step(self, action):
         obs, ext_reward, terminated, truncated, info = self.env.step(action)
         if info is None:
@@ -78,9 +86,10 @@ class RewardWrapper(gym.Wrapper):
         if self._has_dynamic_coef:
             coef = float(self.intrinsic_module.current_coef())
 
+        previous_observation = self._last_observation
         if self._compute_accepts_previous:
             raw_intrinsic = self.intrinsic_module.compute(
-                previous_observation=self._last_observation,
+                previous_observation=previous_observation,
                 observation=obs,
                 info=info,
                 action=action,
@@ -97,6 +106,15 @@ class RewardWrapper(gym.Wrapper):
 
         intrinsic_reward = coef * intrinsic_for_rl
         total_reward = float(ext_reward) + intrinsic_reward
+
+        if self.store_transitions and previous_observation is not None:
+            self._transition_buffer.append(
+                (
+                    np.array(previous_observation, copy=True),
+                    np.array(obs, copy=True),
+                    np.array(action, copy=True),
+                )
+            )
 
         if hasattr(self.intrinsic_module, "record_rl_transition"):
             self.intrinsic_module.record_rl_transition(

@@ -17,15 +17,16 @@ error_hidden_layers: [128, 64]
 error_buffer_size: 100
 error_batch_size: 32
 reward_warmup_size: 100
+model_update_cycle: 64
 dynamics_updates: 1
 error_updates: 1
-error_update_interval: 5
+error_update_interval: 1
 expected_error_scale: 1.0
 log_error_epsilon: 1.0e-6
 
 # Released MiniWorld code applies min(0.5, reward), preserving negative values.
 clamp_min: null
-clamp_max: 0.1
+clamp_max: null
 intrinsic_clip: null
 normalize_reward: false
 max_grad_norm: 0.5

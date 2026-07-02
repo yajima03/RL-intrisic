@@ -32,6 +32,7 @@ Stable-Baselines3 を用いて、Scalable Pyramid（SP）環境上で
 - `SP + DQN + none`
 - `SP + DQN + count`
 - `SP + DQN + RND`
+- `SP + PPO + RND`
 
 ---
 
@@ -64,6 +65,7 @@ outputs/
 
 ベースアルゴリズム
 - DQN
+- PPO
 
 内発的動機付け
 - none: 外部報酬のみ
@@ -108,6 +110,22 @@ uv run python -m src.training.train \
   --env-config configs/env/sp_base.yaml \
   --algo-config configs/algo/dqn.yaml \
   --intrinsic-config configs/intrinsic/count.yaml
+```
+
+- PPO baseline
+``` bash
+uv run python -m src.training.train \
+  --env-config configs/env/sp_base.yaml \
+  --algo-config configs/algo/ppo.yaml \
+  --intrinsic-config configs/intrinsic/none.yaml
+```
+
+- PPO + RND
+``` bash
+uv run python -m src.training.train \
+  --env-config configs/env/sp_base.yaml \
+  --algo-config configs/algo/ppo.yaml \
+  --intrinsic-config configs/intrinsic/rnd.yaml
 ```
 
 - minigrid_doorkey

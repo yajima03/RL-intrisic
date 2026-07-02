@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+import numpy as np
 import torch as th
 import torch.nn as nn
 import yaml
@@ -406,7 +407,7 @@ def parse_args() -> argparse.Namespace:
 
 def prepare_run_dirs(output_dir: Path, run_name: Optional[str]) -> Dict[str, Path]:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    resolved_run_name = run_name or f"dqn_sp_{timestamp}"
+    resolved_run_name = run_name or f"rl_sp_{timestamp}"
     run_dir = output_dir / resolved_run_name
     dirs = {
         "run_dir": run_dir,
@@ -456,7 +457,7 @@ def save_run_metadata(
         "git_commit": git_commit,
         "seed": int(algo_config.get("seed", 0)),
         "environment": env_config,
-        "dqn": algo_config,
+        "algorithm": algo_config,
         "lpm": intrinsic_config,
         "logging": {
             "transition_log_interval": intrinsic_config.get("transition_log_interval", 1),
@@ -475,6 +476,33 @@ def save_run_metadata(
 
 
 
+def _as_int_list(value: Any) -> list[int]:
+    if isinstance(value, int):
+        return [int(value)]
+    return [int(v) for v in value]
+
+
+def _resolve_net_arch(algo_config: Dict[str, Any], *, default: Sequence[int]) -> Any:
+    policy_cfg = dict(algo_config.get("policy_kwargs", {}))
+    if "net_arch" in policy_cfg:
+        net_arch = policy_cfg["net_arch"]
+        if isinstance(net_arch, Mapping):
+            return {key: _as_int_list(value) for key, value in net_arch.items()}
+        return _as_int_list(net_arch)
+
+    if "pi_net_arch" in policy_cfg or "vf_net_arch" in policy_cfg:
+        return {
+            "pi": _as_int_list(policy_cfg.get("pi_net_arch", default)),
+            "vf": _as_int_list(policy_cfg.get("vf_net_arch", default)),
+        }
+
+    hidden_layers = policy_cfg.get(
+        "q_net_hidden_layers",
+        algo_config.get("q_net_hidden_layers", default),
+    )
+    return _as_int_list(hidden_layers)
+
+
 def build_policy_kwargs(algo_config: Dict[str, Any]) -> Dict[str, Any]:
     policy_name = str(algo_config.get("policy", "CnnPolicy"))
     policy_cfg = dict(algo_config.get("policy_kwargs", {}))
@@ -485,27 +513,15 @@ def build_policy_kwargs(algo_config: Dict[str, Any]) -> Dict[str, Any]:
         if extractor_name != "ConfigurableCNN":
             raise ValueError(f"Unsupported features extractor: {extractor_name}")
 
-        q_net_hidden_layers = policy_cfg.get(
-            "q_net_hidden_layers",
-            algo_config.get("q_net_hidden_layers", [256]),
-        )
-        if isinstance(q_net_hidden_layers, int):
-            q_net_hidden_layers = [int(q_net_hidden_layers)]
-        q_net_hidden_layers = [int(v) for v in q_net_hidden_layers]
-
         return {
             "features_extractor_class": ConfigurableCNN,
             "features_extractor_kwargs": extractor_cfg,
-            "net_arch": q_net_hidden_layers,
+            "net_arch": _resolve_net_arch(algo_config, default=[256]),
             "normalize_images": bool(policy_cfg.get("normalize_images", False)),
         }
 
     if policy_name == "MlpPolicy":
-        net_arch = policy_cfg.get("net_arch", algo_config.get("q_net_hidden_layers", [128, 128]))
-        if isinstance(net_arch, int):
-            net_arch = [int(net_arch)]
-        net_arch = [int(v) for v in net_arch]
-        return {"net_arch": net_arch}
+        return {"net_arch": _resolve_net_arch(algo_config, default=[128, 128])}
 
     raise ValueError(f"Unsupported policy: {policy_name}")
 
@@ -707,7 +723,9 @@ def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Pat
 
     policy_name = str(algo_config.get("policy", "CnnPolicy"))
     if policy_name not in {"CnnPolicy", "MlpPolicy"}:
-        raise ValueError("This train.py currently supports only policy='CnnPolicy' or 'MlpPolicy'.")
+        raise ValueError(
+            "This train.py currently supports only policy='CnnPolicy' or 'MlpPolicy'."
+        )
 
     policy_kwargs = build_policy_kwargs(algo_config)
 
@@ -747,6 +765,70 @@ def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Pat
         return LPMAugmentedDQN(lpm_module=intrinsic_module, **common_kwargs)
 
     return DQN(**common_kwargs)
+
+
+def build_ppo_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Path):
+    from stable_baselines3 import PPO
+
+    policy_name = str(algo_config.get("policy", "CnnPolicy"))
+    if policy_name not in {"CnnPolicy", "MlpPolicy"}:
+        raise ValueError(
+            "This train.py currently supports only policy='CnnPolicy' or 'MlpPolicy'."
+        )
+
+    common_kwargs = dict(
+        policy=policy_name,
+        env=train_env,
+        learning_rate=float(algo_config.get("learning_rate", 3e-4)),
+        n_steps=int(algo_config.get("n_steps", 2048)),
+        batch_size=int(algo_config.get("batch_size", 64)),
+        n_epochs=int(algo_config.get("n_epochs", 10)),
+        gamma=float(algo_config.get("gamma", 0.99)),
+        gae_lambda=float(algo_config.get("gae_lambda", 0.95)),
+        clip_range=float(algo_config.get("clip_range", 0.2)),
+        clip_range_vf=(
+            None
+            if algo_config.get("clip_range_vf", None) is None
+            else float(algo_config.get("clip_range_vf"))
+        ),
+        normalize_advantage=bool(algo_config.get("normalize_advantage", True)),
+        ent_coef=float(algo_config.get("ent_coef", 0.0)),
+        vf_coef=float(algo_config.get("vf_coef", 0.5)),
+        max_grad_norm=float(algo_config.get("max_grad_norm", 0.5)),
+        use_sde=bool(algo_config.get("use_sde", False)),
+        sde_sample_freq=int(algo_config.get("sde_sample_freq", -1)),
+        policy_kwargs=build_policy_kwargs(algo_config),
+        tensorboard_log=str(tensorboard_log),
+        seed=int(algo_config.get("seed", 0)),
+        device=str(algo_config.get("device", "auto")),
+        verbose=1,
+    )
+    return PPO(**common_kwargs)
+
+
+def build_model(
+    train_env,
+    algo_config: Dict[str, Any],
+    tensorboard_log: Path,
+    intrinsic_module=None,
+):
+    algo_name = str(algo_config.get("algo_name", "dqn")).lower()
+    if algo_name == "dqn":
+        return build_dqn_model(
+            train_env=train_env,
+            algo_config=algo_config,
+            tensorboard_log=tensorboard_log,
+            intrinsic_module=intrinsic_module,
+        )
+    if algo_name == "ppo":
+        return build_ppo_model(
+            train_env=train_env,
+            algo_config=algo_config,
+            tensorboard_log=tensorboard_log,
+        )
+    raise ValueError(
+        f"Unsupported algo_name: {algo_name}. Supported algorithms: dqn, ppo."
+    )
 
 
 def init_wandb_run(
@@ -843,7 +925,12 @@ def build_callbacks(
     intrinsic_module=None,
     wandb_run=None,
 ) -> Optional[Any]:
-    from stable_baselines3.common.callbacks import BaseCallback, CallbackList, CheckpointCallback, EvalCallback
+    from stable_baselines3.common.callbacks import (
+        BaseCallback,
+        CallbackList,
+        CheckpointCallback,
+        EvalCallback,
+    )
 
     class SB3EnvStatusLoggingCallback(EnvStatusLoggingCallback, BaseCallback):
         def __init__(self, **kwargs):
@@ -854,7 +941,120 @@ def build_callbacks(
         def _on_step(self) -> bool:
             return EnvStatusLoggingCallback._on_step(self)
 
+    class PPOIntrinsicUpdateCallback(BaseCallback):
+        def __init__(
+            self,
+            *,
+            train_env,
+            intrinsic_module,
+            update_freq: int,
+            verbose: int = 0,
+        ):
+            super().__init__(verbose=verbose)
+            self.train_env = train_env
+            self.intrinsic_module = intrinsic_module
+            self.update_freq = int(update_freq)
+
+        def _find_reward_wrapper(self):
+            env = self.train_env
+            while env is not None:
+                if isinstance(env, RewardWrapper):
+                    return env
+                env = getattr(env, "env", None)
+            return None
+
+        def _on_step(self) -> bool:
+            if self.update_freq <= 0 or self.num_timesteps % self.update_freq != 0:
+                return True
+            if self.intrinsic_module is None or not hasattr(
+                self.intrinsic_module,
+                "update_from_batch",
+            ):
+                return True
+
+            reward_wrapper = self._find_reward_wrapper()
+            if reward_wrapper is None or not hasattr(reward_wrapper, "pop_transition_batch"):
+                return True
+
+            transitions = reward_wrapper.pop_transition_batch()
+            if not transitions:
+                return True
+
+            observations = th.as_tensor(
+                np.stack([item[0] for item in transitions]),
+                dtype=th.float32,
+            )
+            next_observations = th.as_tensor(
+                np.stack([item[1] for item in transitions]),
+                dtype=th.float32,
+            )
+            actions = th.as_tensor(
+                np.asarray([item[2] for item in transitions]).reshape(-1, 1),
+                dtype=th.long,
+            )
+
+            if isinstance(self.intrinsic_module, RNDIntrinsicReward):
+                loss = self.intrinsic_module.update_from_batch(next_observations)
+                self.logger.record("train/rnd_loss", float(loss))
+            elif isinstance(self.intrinsic_module, PGLPLocalIntrinsicReward):
+                loss = self.intrinsic_module.update_from_batch(
+                    observations,
+                    next_observations,
+                    actions,
+                )
+                self.logger.record("train/pglp_pred_loss", float(loss))
+            elif isinstance(self.intrinsic_module, LPMIntrinsicReward):
+                losses = self.intrinsic_module.update_from_batch(
+                    observations,
+                    next_observations,
+                    actions,
+                    env_step=self.num_timesteps,
+                    replay_size=len(transitions),
+                )
+                self.logger.record("train/lpm_dynamics_loss", losses["dynamics_loss"])
+                self.logger.record("train/lpm_error_loss", losses["error_loss"])
+                self.logger.record(
+                    "train/lpm_actual_error",
+                    self.intrinsic_module.last_actual_error,
+                )
+                self.logger.record(
+                    "train/lpm_expected_error",
+                    self.intrinsic_module.last_expected_error,
+                )
+                self.logger.record(
+                    "train/lpm_raw_intrinsic",
+                    self.intrinsic_module.last_raw_intrinsic,
+                )
+                self.logger.record(
+                    "train/lpm_error_buffer_size",
+                    len(self.intrinsic_module.error_buffer),
+                )
+                self.logger.record(
+                    "train/lpm_model_updates",
+                    self.intrinsic_module._model_update_count,
+                )
+                self.logger.record(
+                    "train/lpm_reward_coef",
+                    self.intrinsic_module.current_coef(),
+                )
+
+            return True
+
     callbacks = []
+
+    algo_name = str(algo_config.get("algo_name", "dqn")).lower()
+    intrinsic_update_freq = int(
+        algo_config.get("intrinsic_update_freq", algo_config.get("n_steps", 2048))
+    )
+    if algo_name == "ppo" and intrinsic_module is not None:
+        callbacks.append(
+            PPOIntrinsicUpdateCallback(
+                train_env=train_env,
+                intrinsic_module=intrinsic_module,
+                update_freq=intrinsic_update_freq,
+                verbose=1,
+            )
+        )
 
     if wandb_run is not None:
         from wandb.integration.sb3 import WandbCallback
@@ -879,8 +1079,8 @@ def build_callbacks(
             CheckpointCallback(
                 save_freq=checkpoint_freq,
                 save_path=str(run_dirs["checkpoints"]),
-                name_prefix="dqn_sp",
-                save_replay_buffer=True,
+                name_prefix=f"{algo_name}_sp",
+                save_replay_buffer=(algo_name == "dqn"),
                 save_vecnormalize=False,
             )
         )
@@ -943,6 +1143,9 @@ def make_train_env(
             env,
             intrinsic_module=intrinsic_module,
             intrinsic_coef=intrinsic_coef,
+            store_transitions=(
+                str(algo_config.get("algo_name", "dqn")).lower() == "ppo"
+            ),
         )
     else:
         env = RewardWrapper(
@@ -1039,7 +1242,8 @@ def main() -> None:
             intrinsic_config=intrinsic_config,
             run_dirs=run_dirs,
         )
-        model = build_dqn_model(
+        algo_name = str(algo_config.get("algo_name", "dqn")).lower()
+        model = build_model(
             train_env=train_env,
             algo_config=algo_config,
             tensorboard_log=run_dirs["tensorboard"],
@@ -1059,11 +1263,12 @@ def main() -> None:
             callback=callbacks,
             log_interval=int(algo_config.get("logging", {}).get("log_interval", 10)),
             progress_bar=bool(algo_config.get("progress_bar", True)),
-            tb_log_name="dqn_sp",
+            tb_log_name=f"{algo_name}_sp",
         )
 
         model.save(str(final_model_path))
-        model.save_replay_buffer(str(run_dirs["models"] / "final_replay_buffer.pkl"))
+        if algo_name == "dqn":
+            model.save_replay_buffer(str(run_dirs["models"] / "final_replay_buffer.pkl"))
 
         run_summary = {
             "final_model_path": str(final_model_path) + ".zip",

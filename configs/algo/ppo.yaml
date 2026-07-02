@@ -1,0 +1,71 @@
+# Weights & Biases tracking. Set enabled=true after `wandb login`.
+wandb:
+  enabled: false
+  project: "LPM-on-ScalablePyramid"
+  group: "sp-ppo"
+  name: null
+  mode: "online"
+  init_timeout: 30
+  sync_tensorboard: true
+  save_code: true
+  tags: ["ppo", "scalable-pyramid"]
+  notes: "PPO baseline on Scalable Pyramid."
+  upload_logs: true
+
+algo_name: "ppo"
+
+policy: "CnnPolicy"
+device: "auto"
+seed: 0
+progress_bar: true
+deterministic_eval: true
+
+total_timesteps: 50000
+learning_rate: 3.0e-4
+n_steps: 2048
+batch_size: 64
+n_epochs: 10
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+clip_range_vf: null
+normalize_advantage: true
+ent_coef: 0.0
+vf_coef: 0.5
+max_grad_norm: 0.5
+intrinsic_update_freq: 2048
+
+policy_kwargs:
+  normalize_images: false
+  features_extractor:
+    name: "ConfigurableCNN"
+    conv_layers:
+      - out_channels: 32
+        kernel_size: 5
+        stride: 2
+        padding: 2
+      - out_channels: 32
+        kernel_size: 3
+        stride: 2
+        padding: 2
+      - out_channels: 64
+        kernel_size: 3
+        stride: 1
+        padding: 1
+    global_pool: "avg"
+    post_pool_norm: "layernorm"
+    linear_layers: [64]
+    activation: "relu"
+  net_arch:
+    pi: [64]
+    vf: [64]
+
+eval:
+  eval_freq: 1000
+  n_eval_episodes: 50
+
+checkpoint:
+  checkpoint_freq: 5000
+
+logging:
+  log_interval: 10

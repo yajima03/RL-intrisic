@@ -1,0 +1,42 @@
+name: "ama"
+
+initial_coef: 0.1
+final_coef: 0.1
+coef_decay_fraction: 1.0
+
+learning_rate: 1.0e-4
+encoder_type: "cnn"
+activation: "relu"
+feature_dim: 64
+predictor_hidden_layers: [256, 256]
+
+# Paper notation: lambda controls the variance budget; eta controls how much
+# predicted aleatoric variance is subtracted from the prediction-error reward.
+uncertainty_lambda: 0.1
+uncertainty_eta: 1.0
+logvar_min: -10.0
+logvar_max: 6.0
+
+# Minigrid experiments in the paper clip intrinsic rewards below zero.
+clamp_min: 0.0
+clamp_max: null
+normalize_reward: false
+intrinsic_clip: null
+max_grad_norm: 10.0
+
+device: "auto"
+seed: 0
+
+conv_layers:
+  - out_channels: 32
+    kernel_size: 5
+    stride: 2
+    padding: 2
+  - out_channels: 32
+    kernel_size: 3
+    stride: 2
+    padding: 1
+  - out_channels: 64
+    kernel_size: 3
+    stride: 1
+    padding: 1

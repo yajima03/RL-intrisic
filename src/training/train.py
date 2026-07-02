@@ -14,6 +14,7 @@ import torch.nn as nn
 import yaml
 from gymnasium import spaces
 
+from src.intrinsic.ama import AMAConfig, AMAIntrinsicReward, get_ama_augmented_dqn_class
 from src.intrinsic.count_bonus import CountBasedBonus, CountBonusConfig
 from src.intrinsic.lpm import LPMConfig, LPMIntrinsicReward, get_lpm_augmented_dqn_class
 from src.intrinsic.pglp_local import (
@@ -580,6 +581,69 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
         )
         return RNDIntrinsicReward(rnd_config), 1.0, intrinsic_config
 
+    if intrinsic_name in {"ama", "aleatoric_mapping_agent", "aleatoric_mapping_agents"}:
+        policy_name = str((algo_config or {}).get("policy", "CnnPolicy"))
+        default_encoder_type = "mlp" if policy_name == "MlpPolicy" else "cnn"
+        initial_coef = float(intrinsic_config.get("initial_coef", intrinsic_config.get("coef", 1.0)))
+        final_coef = float(intrinsic_config.get("final_coef", initial_coef))
+        total_timesteps = int((algo_config or {}).get("total_timesteps", 1))
+        if intrinsic_config.get("coef_decay_steps", None) is not None:
+            coef_decay_steps = int(intrinsic_config["coef_decay_steps"])
+        else:
+            coef_decay_fraction = float(intrinsic_config.get("coef_decay_fraction", 1.0))
+            coef_decay_steps = max(int(total_timesteps * coef_decay_fraction), 1)
+
+        ama_config = AMAConfig(
+            learning_rate=float(intrinsic_config.get("learning_rate", 1.0e-4)),
+            encoder_type=str(intrinsic_config.get("encoder_type", default_encoder_type)),
+            conv_layers=intrinsic_config.get("conv_layers", None),
+            activation=str(intrinsic_config.get("activation", "relu")),
+            feature_dim=int(intrinsic_config.get("feature_dim", intrinsic_config.get("embedding_dim", 64))),
+            predictor_hidden_layers=tuple(
+                intrinsic_config.get(
+                    "predictor_hidden_layers",
+                    intrinsic_config.get("predictor_fc_layers", [256, 256]),
+                )
+            ),
+            uncertainty_lambda=float(intrinsic_config.get("uncertainty_lambda", intrinsic_config.get("lambda", 0.1))),
+            uncertainty_eta=float(intrinsic_config.get("uncertainty_eta", intrinsic_config.get("eta", 1.0))),
+            logvar_min=float(intrinsic_config.get("logvar_min", -10.0)),
+            logvar_max=float(intrinsic_config.get("logvar_max", 6.0)),
+            clamp_min=(
+                None
+                if intrinsic_config.get("clamp_min", 0.0) is None
+                else float(intrinsic_config.get("clamp_min", 0.0))
+            ),
+            clamp_max=(
+                None
+                if intrinsic_config.get("clamp_max", None) is None
+                else float(intrinsic_config.get("clamp_max"))
+            ),
+            normalize_reward=bool(intrinsic_config.get("normalize_reward", False)),
+            reward_gamma=float(intrinsic_config.get("reward_gamma", 0.99)),
+            reward_norm_eps=float(intrinsic_config.get("reward_norm_eps", 1.0e-8)),
+            intrinsic_clip=(
+                None
+                if intrinsic_config.get("intrinsic_clip", None) is None
+                else float(intrinsic_config.get("intrinsic_clip"))
+            ),
+            initial_coef=initial_coef,
+            final_coef=final_coef,
+            coef_decay_steps=coef_decay_steps,
+            max_grad_norm=(
+                None
+                if intrinsic_config.get("max_grad_norm", 10.0) is None
+                else float(intrinsic_config.get("max_grad_norm", 10.0))
+            ),
+            device=str(intrinsic_config.get("device", "auto")),
+            seed=(
+                None
+                if intrinsic_config.get("seed", None) is None
+                else int(intrinsic_config.get("seed"))
+            ),
+        )
+        return AMAIntrinsicReward(ama_config), 1.0, intrinsic_config
+
     if intrinsic_name in {"lpm", "learning_progress_monitoring"}:
         policy_name = str((algo_config or {}).get("policy", "CnnPolicy"))
         default_encoder_type = "mlp" if policy_name == "MlpPolicy" else "cnn"
@@ -737,6 +801,10 @@ def build_dqn_model(train_env, algo_config: Dict[str, Any], tensorboard_log: Pat
     if isinstance(intrinsic_module, RNDIntrinsicReward):
         RNDAugmentedDQN = get_rnd_augmented_dqn_class()
         return RNDAugmentedDQN(rnd_module=intrinsic_module, **common_kwargs)
+
+    if isinstance(intrinsic_module, AMAIntrinsicReward):
+        AMAAugmentedDQN = get_ama_augmented_dqn_class()
+        return AMAAugmentedDQN(ama_module=intrinsic_module, **common_kwargs)
 
     if isinstance(intrinsic_module, PGLPLocalIntrinsicReward):
         PGLPAugmentedDQN = get_pglp_augmented_dqn_class()

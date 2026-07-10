@@ -623,6 +623,7 @@ def build_intrinsic_module(intrinsic_config: Dict[str, Any], algo_config: Option
             error_buffer_size=int(intrinsic_config.get("error_buffer_size", 10_000)),
             error_batch_size=int(intrinsic_config.get("error_batch_size", 64)),
             reward_warmup_size=int(intrinsic_config.get("reward_warmup_size", 64)),
+            model_update_cycle=int(intrinsic_config.get("model_update_cycle", 64)),
             dynamics_updates=int(intrinsic_config.get("dynamics_updates", 1)),
             error_updates=int(intrinsic_config.get("error_updates", 1)),
             error_update_interval=int(intrinsic_config.get("error_update_interval", 1)),

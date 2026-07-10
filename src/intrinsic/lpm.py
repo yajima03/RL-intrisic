@@ -587,7 +587,7 @@ class LPMIntrinsicReward:
         # error model consumes these entries after collection, approximating
         # epsilon^(tau-1) as required by LPM.
         current_log_error = float(
-            np.log(actual_error + float(self.config.log_error_epsilon))
+            np.log(max(actual_error, float(self.config.log_error_epsilon)))
         )
         self.error_buffer.append(
             _ErrorQueueEntry(
